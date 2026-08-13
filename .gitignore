@@ -16,6 +16,14 @@ temp*
 tpcudata
 twfdata
 *.tmp
+*.spec
+
+#Files
+scndata
+sma.txt
+tcpomdata
+tpcudata
+twfdata
 
 # Virtual Environment
 venv/
@@ -37,3 +45,5 @@ dist/
 fpd/ 
 test1/
 tup/   
+
+# Specific files
