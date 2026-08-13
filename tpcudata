@@ -1,0 +1,7 @@
+self.oipEntry.insert(0, "192.168.15.103")
+self.opEntry.insert(0, "4433")
+self.cb_sfn_var.set(0)
+self.fnEntry.insert(0, "C:/files from linux/wtf.txt")
+self.cb_sfn_var.set(0)
+self.cb_getAck_var.set(1)
+END

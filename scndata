@@ -1,0 +1,3 @@
+self.e1.insert(0, "192.168.15.103")
+self.cb_mllp_var.set(1)
+END
