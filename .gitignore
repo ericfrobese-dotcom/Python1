@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.docx
+*.pdf
+minion_v1.py
+numerology.py
+old*
+progression*
+*.zip
+rd2frac.py
+scndata
+sdrf.py
+temp*
+tpcudata
+twfdata
+*.tmp
+
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# IDEs
+.vscode/
+.idea/
+
+# Environment variables
+.env   
+
+# Build and distribution directories
+build/
+dist/
+
+# Specific test and temporary directories
+fpd test1/
+tup/   
