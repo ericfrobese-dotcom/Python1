@@ -34,5 +34,6 @@ build/
 dist/
 
 # Specific test and temporary directories
-fpd test1/
+fpd/ 
+test1/
 tup/   
