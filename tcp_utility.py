@@ -4,6 +4,8 @@ from PIL import Image, ImageTk
 from tkinter import filedialog
 from tkinter import messagebox as mb
 import socket
+import threading
+import queue as _queue
 import os
 import shutil
 import datetime as dt
@@ -616,107 +618,170 @@ class win(Frame):
 
     def listenOnPort(self):
         ipv = self.ipEntry.get()
-        ok = True
         if len(ipv) == 0:
-            mb.showerror('"Listen on" port value missing', 'Please enter the Listening Port value')
-            ok = False
-        if ok:
-            iip = '0.0.0.0'
+            mb.showerror('\"Listen on\" port value missing', 'Please enter the Listening Port value')
+            return
+        try:
             port = int(ipv)
-            self.iStat('Listening on port {}'.format(ipv),'white','green')
-            self.update()
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            inipNport = (iip,port)  # Inbound Ip aNd Port
-            #self.iStat('Starting listener on {}'.format(inipNport), 'white', 'black')
-            #self.triggerRefresh()
-            print('Starting listener on {}'.format(inipNport))
-            try:
-                sock.bind(inipNport) 
-            except:
-                e = sys.exc_info()
-                self.iStat('Error on socket.bind','black','red')
-                self.ime(e,'black','red')
-            kl = True  # Keep Listening
-            while kl:
+        except Exception:
+            mb.showerror('Invalid port', 'Enter a numeric port value')
+            return
+        # create inter-thread queue and stop event
+        self.listener_queue = _queue.Queue()
+        self.listener_stop = threading.Event()
+        send_ack = True if self.cb_sendAck_var.get() == 1 else False
+        # start listener thread
+        self.listener_thread = threading.Thread(target=self._listener_thread_main, args=(port, self.listener_queue, self.listener_stop, send_ack), daemon=True)
+        self.listener_thread.start()
+        self.listenButton.config(text='Stop', command=self.stop_listener)
+        self.status.set(f'Started listener on 0.0.0.0:{port}')
+        self.status_label.config(bg='green', fg='white')
+        # start polling queue
+        self.after(200, self._poll_listener_queue)
+
+    def _poll_listener_queue(self):
+        try:
+            while True:
                 try:
-                    sock.listen(1)
-                except:
-                    e = sys.exc_info()
-                    self.iStat('Error on socket.listen','black','red')
-                    self.ime(e,'black','red')
-                print('Listening on port {}'.format(ipv))
-                try:
-                    connection, client_address = sock.accept()
-                    self.iStat('Connected to ip: {}'.format(client_address),'white','green')
-                except:
-                    e = sys.exc_info()
-                    self.iStat('Error on socket.accept','black','red')
-                    self.ime(e,'black','red')
-                print('Connected to ip: {}'.format(client_address))
-                kr = True  # Keep Receiving
-                data = ''
-                while kr:
-                    try:
-                        pd = connection.recv(1000)  # Partial Data
-                    except:
-                        e = sys.exc_info()
-                        self.iStat('Eroor on socket.bind','black','red')
-                        self.ime(e,'black','red')
-                    data = data + pd.decode()
-                    if pd.decode().find(chr(28)) != -1:
-                        kr = False
-                #print('Recieved data:\n{}'.format(data))
-                rfnv = self.cb_rfn_var.get()
-                if rfnv == 1:
-                    sp = data.find('filename:')
-                    if sp == -1:
-                        msg = 'No filename passed'
-                        print(msg)
-                        self.iStat(msg,'white','orange')
-                        break
-                    sp += 10  # starting after the filename:  label on line 1
-                    ep = data.find('\n')  # Ending Position (end of first line)
+                    item = self.listener_queue.get_nowait()
+                except _queue.Empty:
+                    break
+                if not item:
+                    continue
+                if isinstance(item, tuple) and item[0] == '__error__':
+                    self.status.set('Listener error: ' + str(item[1]))
+                    continue
+                data, addr = item
+                # process incoming on main thread
+                self._process_incoming_ui(data, addr)
+        except Exception:
+            # ignore transient errors
+            pass
+        # if thread still running, schedule another poll
+        if getattr(self, 'listener_thread', None) and self.listener_thread.is_alive():
+            self.after(200, self._poll_listener_queue)
+        else:
+            # ensure UI button reset
+            self.listenButton.config(text='Listen', command=self.listenOnPort)
+            self.status.set('Listener stopped')
+            self.status_label.config(bg='blue', fg='white')
+
+    def stop_listener(self):
+        if getattr(self, 'listener_thread', None) and self.listener_thread.is_alive():
+            self.listener_stop.set()
+            self.status.set('Stopping listener...')
+            self.listenButton.config(state='disabled')
+            # give thread a moment to exit
+            self.after(500, self._finish_stop)
+        else:
+            self.status.set('Listener not running')
+
+    def _finish_stop(self):
+        try:
+            if getattr(self, 'listener_thread', None):
+                self.listener_thread.join(timeout=0.5)
+        except Exception:
+            pass
+        self.listenButton.config(text='Listen', command=self.listenOnPort, state='normal')
+        self.status.set('Listener stopped')
+        self.status_label.config(bg='blue', fg='white')
+
+    def _process_incoming_ui(self, data, client_address):
+        # replicate the original per-message handling from listenOnPort's loop
+        try:
+            rfnv = self.cb_rfn_var.get()
+            data_body = data
+            if rfnv == 1:
+                sp = data.find('filename:')
+                if sp != -1:
+                    sp += 10
+                    ep = data.find('\n')
                     if ep == -1:
                         ep = data.find('\r')
-                    ofn = data[sp:ep]
-                    nep = data.find(chr(28))  # New End Point
-                    data = data[ep+1:nep]
-                    # file could be comming from another os system and may differ from what we calcuated from local dir value
-                    dsc = '/' if ofn.find('/') > -1 else '\\'  # Directory Separator Character
+                    ofn = data[sp:ep] if ep != -1 else data[sp:]
+                    nep = data.find(chr(28))
+                    if nep != -1:
+                        data_body = data[ep+1:nep] if ep != -1 else data[:nep]
+                    else:
+                        data_body = data[ep+1:] if ep != -1 else data
+                    dsc = '/' if ofn.find('/') > -1 else '\\'
                     chop = ofn.find(dsc)
                     while chop > -1:
                         ofn = ofn[chop+1:]
                         chop = ofn.find(dsc)
                     self.fnOutEntry.delete(0,END)
-                    self.fnOutEntry.insert(0,ofn)                    
-                self.twim.delete(1.0,END)
-                self.twim.configure(fg = 'black', bg = 'white')
-                self.twim.insert(1.0,data)
-                self.twim.grid(row = 9, column = 1, sticky = W)
-                self.iStat('Message Received','white','green')
-                sav = self.cb_sendAck_var.get()
-                #print('sav = {}'.format(sav))
-                if sav == 1:
-                    built = self.buildAck()
-                    print('Back from buildAck()')
-                    if built:
-                        try:
-                            connection.sendall(self.oa.encode())
-                        except:
-                            e = sys.exc_info()
-                            self.iStat('Error on connection.sendall','black','red')
-                            self.ime(e,'black','red')
-                        aack = self.oa  # ASCII ACK
-                        self.twia.delete(1.0, END)
-                        self.twia.insert(1.0, aack)
-                        self.twia.grid(row = 10, column = 1, sticky = W)
-                        self.gStat('ACK Sent','white','green')
-                kl = mb.askyesno('Message Received','Keep listening?', default = 'no')
-                connection.close()
-                print('Connection closed')
+                    self.fnOutEntry.insert(0,ofn)
+            self.twim.delete(1.0,END)
+            self.twim.configure(fg = 'black', bg = 'white')
+            self.twim.insert(1.0,data_body)
+            self.twim.grid(row = 9, column = 1, sticky = W)
+            self.iStat(f'Message received from {client_address}','white','green')
+        except Exception as e:
+            self.iStat(f'Error processing incoming: {e}','black','red')
+
+    def _listener_thread_main(self, port, out_queue, stop_event, send_ack):
+        """Threaded listener: accepts connections (with a short timeout), reads until record separator (chr(28)),
+        and puts (data, client_addr) tuples on the provided out_queue for the GUI thread to process.
+        """
+        import socket
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(('0.0.0.0', port))
+            sock.listen(1)
+            sock.settimeout(1.0)
+        except Exception as e:
+            out_queue.put(('__error__', f'Failed to bind/listen: {e}'))
+            return
+        while not stop_event.is_set():
+            try:
+                try:
+                    conn, client_addr = sock.accept()
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    out_queue.put(('__error__', f'Accept error: {e}'))
+                    continue
+                # receive until record separator or connection closed
+                data = ''
+                conn.settimeout(1.0)
+                while True:
+                    if stop_event.is_set():
+                        break
+                    try:
+                        chunk = conn.recv(4096)
+                    except socket.timeout:
+                        continue
+                    except Exception as e:
+                        out_queue.put(('__error__', f'Recv error: {e}'))
+                        break
+                    if not chunk:
+                        break
+                    try:
+                        s = chunk.decode()
+                    except Exception:
+                        s = chunk.decode(errors='ignore')
+                    data += s
+                    if chr(28) in s:
+                        break
+                # hand off to UI thread
+                out_queue.put((data, client_addr))
+                if send_ack:
+                    try:
+                        conn.sendall(b'ACK')
+                    except Exception:
+                        pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            except Exception as e:
+                out_queue.put(('__error__', str(e)))
+        try:
             sock.close()
-            print('Socket Closed')
-            
+        except Exception:
+            pass
+
     def client_exit(self):
         root.destroy()
        
