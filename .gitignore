@@ -24,6 +24,8 @@ sma.txt
 tcpomdata
 tpcudata
 twfdata
+tcp.utilities.py
+tcp.listener.process.py
 
 # Virtual Environment
 venv/
