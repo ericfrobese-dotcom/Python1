@@ -2,6 +2,7 @@
 from tkinter import *
 from tkinter import filedialog
 from tkinter import messagebox as mb
+from tkinter import ttk
 import os
 import shutil
 import getpass
@@ -9,6 +10,8 @@ import datetime as dt
 import webbrowser
 import re
 import urllib.parse as up
+import threading
+import queue
 #setRunDir = True
 setRunDir = False
 home = os.getcwd()
@@ -398,35 +401,30 @@ class win(Frame):
                 return
             # If sink_mode is enabled, perform directory sync for each destination
             if sink_mode and source_dir:
-                # iterate destinations
+                # prepare destination list
                 dlines = [l for l in twddv.splitlines() if l.strip()]
-                total_created = total_updated = total_skipped = total_errors = 0
+                dests = []
                 for dd in dlines:
                     dd_res = self._normalize_destination(dd)
                     dd_use = dd_res if dd_res != dd and os.path.isdir(dd_res) else dd
                     if dd.lower().startswith('mtp:') and dd_res == dd:
                         print('Skipping MTP destination not mounted: {}'.format(dd))
-                        total_errors += 1
                         continue
                     if not os.path.isdir(dd_use):
                         print('Destination not a dir: {}'.format(dd_use))
-                        total_errors += 1
                         continue
-                    # perform recursive copy/sync
-                    try:
-                        counts = self._sync_dir_to_dest(source_dir, dd_use)
-                        total_created += counts.get('created', 0)
-                        total_updated += counts.get('updated', 0)
-                        total_skipped += counts.get('skipped', 0)
-                        total_errors += counts.get('errors', 0)
-                        self.gStat(f"Synced {source_dir} -> {dd_use} (created={counts.get('created',0)} updated={counts.get('updated',0)} errors={counts.get('errors',0)})", 'black', 'green')
-                    except Exception as e:
-                        total_errors += 1
-                        print('Error syncing {} -> {}: {}'.format(source_dir, dd_use, e))
-                m = f'Sync completed. Created: {total_created} Updated: {total_updated} Skipped: {total_skipped} Errors: {total_errors}'
-                self.gStat(m,'white','blue')
-                print(m)
+                    dests.append(dd_use)
+                if not dests:
+                    mb.showerror('No valid Destinations', 'No valid destination directories to sync to. Ensure devices are mounted.')
+                    return
+                # count total files for progress
+                total_files = 0
+                for _root, _dirs, files in os.walk(source_dir):
+                    total_files += len(files)
+                # start background thread to perform sync and show progress UI
+                self._start_sync_thread(source_dir, dests, total_files)
                 return
+
             # Otherwise, original per-file behavior
             uc = 0
             mc = 0
@@ -575,13 +573,74 @@ class win(Frame):
             print(m)
             self.gStat(m,'white','blue')
        
-    def _sync_dir_to_dest(self, src_dir, dest_dir):
-        """Recursively sync src_dir into dest_dir. Returns counts dict."""
+    def _start_sync_thread(self, source_dir, dests, total_files):
+        # Create progress window
+        pw = Toplevel(self.master)
+        pw.title('Sync Progress')
+        Label(pw, text=f'Syncing {source_dir}').grid(row=0, column=0, padx=8, pady=8)
+        progress_var = IntVar(value=0)
+        pb = ttk.Progressbar(pw, maximum=total_files, variable=progress_var, length=600)
+        pb.grid(row=1, column=0, padx=8, pady=4)
+        status_label = Label(pw, text='Starting...')
+        status_label.grid(row=2, column=0, padx=8, pady=4)
+        cancel_event = threading.Event()
+        def on_cancel():
+            cancel_event.set()
+            status_label.config(text='Cancelling...')
+        Button(pw, text='Cancel', command=on_cancel).grid(row=3, column=0, padx=8, pady=6)
+        pw.transient(self.master)
+        pw.grab_set()
+
+        def progress_cb_factory(pv, sl):
+            # pv is IntVar, sl is Label
+            def _cb(processed, total, filename):
+                # schedule GUI update on main thread
+                def gui_upd():
+                    pv.set(processed)
+                    sl.config(text=f"{processed}/{total}: {os.path.basename(filename)}")
+                self.master.after(1, gui_upd)
+            return _cb
+
+        def worker():
+            total_created = total_updated = total_skipped = total_errors = 0
+            for dd in dests:
+                if cancel_event.is_set():
+                    break
+                # reset progress for this destination
+                self.master.after(1, lambda: progress_var.set(0))
+                cb = progress_cb_factory(progress_var, status_label)
+                try:
+                    counts = self._sync_dir_to_dest(source_dir, dd, progress_callback=cb, total_files=total_files, stop_event=cancel_event)
+                    total_created += counts.get('created',0)
+                    total_updated += counts.get('updated',0)
+                    total_skipped += counts.get('skipped',0)
+                    total_errors += counts.get('errors',0)
+                except Exception as e:
+                    total_errors += 1
+                    print('Error syncing {} -> {}: {}'.format(source_dir, dd, e))
+            # finalize
+            summary = f'Sync finished. Created:{total_created} Updated:{total_updated} Skipped:{total_skipped} Errors:{total_errors}'
+            def finish():
+                status_label.config(text=summary)
+                Button(pw, text='Close', command=pw.destroy).grid(row=4, column=0, padx=8, pady=6)
+                pw.grab_release()
+            self.master.after(1, finish)
+        th = threading.Thread(target=worker, daemon=True)
+        th.start()
+
+    def _sync_dir_to_dest(self, src_dir, dest_dir, progress_callback=None, total_files=None, stop_event=None):
+        """Recursively sync src_dir into dest_dir. Returns counts dict.
+        progress_callback(processed_count, total_files, current_file) optional.
+        stop_event is threading.Event to allow cancellation.
+        """
         counts = {'created': 0, 'updated': 0, 'skipped': 0, 'errors': 0}
         if not os.path.isdir(src_dir):
             raise FileNotFoundError(f"Source directory does not exist: {src_dir}")
         src_dir = os.path.normpath(src_dir)
+        processed = 0
         for root, dirs, files in os.walk(src_dir):
+            if stop_event and stop_event.is_set():
+                break
             rel = os.path.relpath(root, src_dir)
             if rel == '.':
                 rel = ''
@@ -593,6 +652,8 @@ class win(Frame):
                 print(f"Could not create directory {target_root}: {e}")
                 continue
             for fname in files:
+                if stop_event and stop_event.is_set():
+                    break
                 src_f = os.path.join(root, fname)
                 dest_f = os.path.join(target_root, fname)
                 try:
@@ -610,6 +671,9 @@ class win(Frame):
                     d_mtime = 0
                 if s_mtime <= d_mtime:
                     counts['skipped'] += 1
+                    processed += 1
+                    if progress_callback:
+                        progress_callback(processed, total_files, src_f)
                     continue
                 # copy file (try copy2 then fallback)
                 try:
@@ -626,20 +690,28 @@ class win(Frame):
                     except Exception as e2:
                         counts['errors'] += 1
                         print(f"Error copying {src_f} -> {dest_f}: {e} -- {e2}")
+                        processed += 1
+                        if progress_callback:
+                            progress_callback(processed, total_files, src_f)
                         continue
                     else:
                         if d_mtime == 0:
                             counts['created'] += 1
                         else:
                             counts['updated'] += 1
+                processed += 1
+                if progress_callback:
+                    progress_callback(processed, total_files, src_f)
         return counts
 
 root = Tk() 
 cd = os.getcwd()
 if cd.find('/') > -1:
-    root.geometry('840x360')  # linux Debian 10
+    root.geometry('1000x520')  # linux Debian 10 - widened to show all buttons
+    root.minsize(900,480)
 else:
-    root.geometry('790x260')  # Windows 10
+    root.geometry('900x420')  # Windows 10
+    root.minsize(800,380)
 app = win(root)
 root.mainloop()
 
