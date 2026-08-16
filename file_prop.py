@@ -7,6 +7,8 @@ import shutil
 import getpass
 import datetime as dt
 import webbrowser
+import re
+import urllib.parse as up
 #setRunDir = True
 setRunDir = False
 home = os.getcwd()
@@ -186,10 +188,23 @@ class win(Frame):
         root.destroy()
     
     def selectDir(self):
+        # Try to open the directory chooser rooted at common mount points so attached devices are shown
         cwd = os.getcwd()
-        dd = filedialog.askdirectory(parent = self, initialdir = cwd, title = 'Select Directory')
-        self.twdd.insert(END, dd+'\n')
-        self.twdd.grid(row = 7, padx = 4, sticky = W)
+        user = getpass.getuser()
+        candidates = [cwd, f"/run/media/{user}", f"/media/{user}", "/mnt", "/"]
+        initial = cwd
+        for c in candidates:
+            if os.path.exists(c):
+                initial = c
+                break
+        dd = filedialog.askdirectory(parent=self, initialdir=initial, title='Select Directory (mounted devices may appear under /run/media or /media)')
+        if not dd:
+            # user cancelled
+            return
+        # normalize path
+        dd = os.path.normpath(dd)
+        self.twdd.insert(END, dd + '\n')
+        self.twdd.grid(row=7, padx=4, sticky=W)
         m = 'Directory {} added to Destination Directories'.format(dd)
         print(m)
         self.gStat(m)
@@ -286,6 +301,52 @@ class win(Frame):
         self.gStat('File {} added to Source Files'.format(fn))
         print('File {} added to Source Files'.format(fn))
         
+    def _normalize_destination(self, dd):
+        """Normalize destination string. Support mtp:// URIs by resolving gvfs mount under /run/user/<uid>/gvfs.
+        Returns a filesystem path if resolvable, otherwise returns original dd unchanged.
+        """
+        if not dd:
+            return dd
+        dd = dd.strip()
+        # handle mtp URI variants
+        if dd.lower().startswith('mtp:'):
+            # remove leading scheme
+            rest = re.sub(r'^mtp:\/\/?', '', dd, flags=re.IGNORECASE)
+            parts = rest.split('/', 1)
+            host = parts[0]
+            subpath = parts[1] if len(parts) > 1 else ''
+            # decode percent-encodings
+            host_dec = up.unquote(host)
+            sub_dec = up.unquote(subpath)
+            # search gvfs mounts for matching host
+            uid = os.getuid()
+            gvfs_root = f"/run/user/{uid}/gvfs"
+            if os.path.isdir(gvfs_root):
+                try:
+                    for entry in os.listdir(gvfs_root):
+                        entry_dec = up.unquote(entry)
+                        if 'mtp' in entry.lower() and host_dec in entry_dec:
+                            candidate = os.path.join(gvfs_root, entry, *sub_dec.split('/')) if sub_dec else os.path.join(gvfs_root, entry)
+                            candidate = os.path.normpath(candidate)
+                            return candidate
+                except Exception:
+                    pass
+            # fallback: try common gvfs path under home
+            homegvfs = os.path.expanduser('~/.gvfs')
+            if os.path.isdir(homegvfs):
+                try:
+                    for entry in os.listdir(homegvfs):
+                        entry_dec = up.unquote(entry)
+                        if 'mtp' in entry.lower() and host_dec in entry_dec:
+                            candidate = os.path.join(homegvfs, entry, *sub_dec.split('/')) if sub_dec else os.path.join(homegvfs, entry)
+                            return os.path.normpath(candidate)
+                except Exception:
+                    pass
+            # couldn't resolve
+            return dd
+        else:
+            return dd
+
     def startProp(self):
         ok = True
         twsfv = self.twsf.get("1.0",'end-1c')
@@ -361,21 +422,44 @@ class win(Frame):
                         deld = dwd.find('\n')
                         continue
                     print('Checking Destination Directory: {}'.format(dd))
-                    fdn = dd + self.dsc + bfn  # Full Dest Name
-                    try:
-                        os.chdir(dd)
-                    except:
-                        e = sys.exc_info()
-                        print('Error could not open to dest dir:\n{}'.format(fdn))
-                        print('Error:\n{}'.format(e))
+                    # normalize destination (supports mtp:// URIs via gvfs)
+                    dd_res = self._normalize_destination(dd)
+                    if dd_res != dd and os.path.isdir(dd_res):
+                        dd_use = dd_res
+                    else:
+                        dd_use = dd
+                    # If the normalized looks like an mtp URI and didn't resolve, warn user
+                    if dd.lower().startswith('mtp:') and dd_res == dd:
+                        print('Error: MTP path provided but device mount not found for: {}'.format(dd))
                         ec += 1
-                        self.gStat('Destination Directory {} Not Found'.format(dd),'black','red')
-                        mb.showerror('Directory not found:',dd)
+                        self.gStat('MTP device not mounted or not accessible: {}'.format(dd),'black','red')
+                        mb.showerror('MTP device not mounted', f"Could not resolve MTP path: {dd}\nPlease open the device in your file manager so it is mounted and try again.")
+                        deld = dwd.find('\n')
                         continue
-                    ls = os.listdir()
+                    fdn = os.path.join(dd_use, bfn)  # Full Dest Name
+                    # ensure destination directory exists and is accessible
+                    if not os.path.isdir(dd_use):
+                        print('Error: destination directory does not exist: {}'.format(dd_use))
+                        ec += 1
+                        self.gStat('Destination Directory {} Not Found'.format(dd_use),'black','red')
+                        mb.showerror('Directory not found:',dd_use)
+                        deld = dwd.find('\n')
+                        continue
+                    try:
+                        ls = os.listdir(dd_use)
+                    except Exception as e:
+                        print('Error listing destination directory {}: {}'.format(dd_use, e))
+                        ec += 1
+                        self.gStat('Unable to read Destination Directory {}'.format(dd_use),'black','red')
+                        mb.showerror('Directory not readable:', dd_use)
+                        deld = dwd.find('\n')
+                        continue
                     if bfn in ls:
-                        dflmt = os.path.getmtime(fdn)
-                        v = ' updated on '  # Verb
+                        try:
+                            dflmt = os.path.getmtime(fdn)
+                        except Exception:
+                            dflmt = 0.0
+                        v = ' updated on '
                         print('Destination file last modified timestame : {}'.format(dflmt))
                         its = int(dflmt)
                         print(dt.datetime.fromtimestamp(its).strftime('%Y-%m-%d %H:%M:%S'))
@@ -383,20 +467,26 @@ class win(Frame):
                         print('File not yet in Destination directory.')
                         dflmt = 0.0
                         v = ' moved to '
-                    #print('dd = {}  fdn = {}  sflmt = {}  dflmt = {}'.format(dd,fdn,sflmt,dflmt))
+                    # copy using shutil.copy2 to handle metadata and avoid manual open/write
                     if sflmt > dflmt:
+                        # Try a full copy preserving metadata first; if the destination (e.g. gvfs/mtp)
+                        # doesn't support metadata operations, fall back to a content-only copy.
                         try:
-                            fo = open(fdn,'wb')
-                            fo.write(sd)
-                            fo.close()
-                        except:
-                            e = sys.exc_info()
-                            ec+=1
-                            print('<< Error Opening Destination File>>\n{}'.format(e))
-                            continue
-                        m = '>> {}{}{}'.format(bfn,v,dd)
+                            shutil.copy2(sf, fdn)
+                        except Exception as e:
+                            print('shutil.copy2 failed, falling back to content-only copy: {}'.format(e))
+                            try:
+                                with open(sf, 'rb') as src, open(fdn, 'wb') as dst:
+                                    shutil.copyfileobj(src, dst)
+                            except Exception as e2:
+                                ec += 1
+                                print('<< Error copying to Destination File>>\n{} -- {}'.format(e, e2))
+                                self.gStat('Error copying to {}'.format(fdn), 'black', 'red')
+                                deld = dwd.find('\n')
+                                continue
+                        m = '>> {}{}{}'.format(bfn, v, dd_use)
                         print(m)
-                        if v.find('up') > -1:
+                        if 'updated' in v:
                             uc += 1
                         else:
                             mc += 1
@@ -406,6 +496,7 @@ class win(Frame):
                         print(m)
                         ac += 1
                         self.gStat(m,'black','Yellow')
+                    deld = dwd.find('\n')
             m = 'Created: {}  Updated: {}  Not Old: {}  Errors: {}'.format(mc,uc,ac,ec)
             print(m)
             self.gStat(m,'white','blue')
