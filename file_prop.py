@@ -110,13 +110,20 @@ class win(Frame):
         # Row 5 - Source File List 
         self.sfButton = Button(self, text = 'Add Source File', command = self.chooseFile)
         self.sfButton.grid(row = 5, column = 1, sticky = W)
-        self.twsf = Text(self, height = 3, width = 80)  # Text Widget Source Files
+        # Add Source Dir button for sink option
+        self.sdButton = Button(self, text = 'Add Source Dir', command = self.selectSourceDir)
+        self.sdButton.grid(row = 5, column = 2, sticky = W)
+        self.twsf = Text(self, height = 3, width = 80)  # Text Widget Source Files / Dir
         self.twsf.grid(row = 5, padx = 4, sticky = W)        
         # Row 7 - Destination Directory List
         self.ddButton = Button(self, text = 'Add Destination Dir', command = self.selectDir)
         self.ddButton.grid(row = 7, column = 1, sticky = W)
         self.twdd = Text(self, height = 6, width = 80)  # Text Widget Inbound Message
         self.twdd.grid(row = 7, padx = 4, sticky = W)
+        # Sink option checkbox
+        self.sink_var = IntVar(value=0)
+        self.sink_cb = Checkbutton(self, text='Sink entire source directory to each destination', variable=self.sink_var)
+        self.sink_cb.grid(row=6, column=1, columnspan=2, sticky=W)
         # Row 8 - Start Propagate Button
         self.spButton = Button(self, text = "Start Propagation", command = self.startProp)
         self.spButton.grid(row = 8)
@@ -296,10 +303,24 @@ class win(Frame):
             
     def chooseFile(self):
         fn = filedialog.askopenfilename(parent = self,initialdir = self.runDir, title = 'Choose File', filetypes = (("all files","*"),("all files","*.*")))
+        if not fn:
+            return
         self.twsf.insert(END,fn + '\n')
         self.twsf.grid(row = 5, padx = 4, sticky = W)
         self.gStat('File {} added to Source Files'.format(fn))
         print('File {} added to Source Files'.format(fn))
+
+    def selectSourceDir(self):
+        cwd = os.getcwd()
+        sd = filedialog.askdirectory(parent=self, initialdir=cwd, title='Select Source Directory')
+        if not sd:
+            return
+        sd = os.path.normpath(sd)
+        # mark as source dir in twsf with a prefix so older behavior still works
+        self.twsf.insert(END, '[DIR] ' + sd + '\n')
+        self.twsf.grid(row = 5, padx = 4, sticky = W)
+        self.gStat('Source directory {} added to Source list'.format(sd))
+        print('Source directory {} added to Source list'.format(sd))
         
     def _normalize_destination(self, dd):
         """Normalize destination string. Support mtp:// URIs by resolving gvfs mount under /run/user/<uid>/gvfs.
@@ -362,8 +383,55 @@ class win(Frame):
             mc = 0  # Move Count
             ac = 0  # Already up to date Count
             ec = 0  # Error Count
-            # Looping Through the Source Files
-            swd = twsfv  # Source Work Data
+            # If sink option selected, look for a source directory entry
+            sink_mode = bool(self.sink_var.get())
+            source_dir = None
+            swd = twsfv
+            # detect [DIR] lines in source list
+            lines = [l for l in swd.splitlines() if l.strip()]
+            for l in lines:
+                if l.startswith('[DIR]'):
+                    source_dir = l[6:].strip()
+                    break
+            if sink_mode and not source_dir:
+                mb.showerror('No Source Directory', 'Sink mode selected but no source directory provided. Use Add Source Dir.')
+                return
+            # If sink_mode is enabled, perform directory sync for each destination
+            if sink_mode and source_dir:
+                # iterate destinations
+                dlines = [l for l in twddv.splitlines() if l.strip()]
+                total_created = total_updated = total_skipped = total_errors = 0
+                for dd in dlines:
+                    dd_res = self._normalize_destination(dd)
+                    dd_use = dd_res if dd_res != dd and os.path.isdir(dd_res) else dd
+                    if dd.lower().startswith('mtp:') and dd_res == dd:
+                        print('Skipping MTP destination not mounted: {}'.format(dd))
+                        total_errors += 1
+                        continue
+                    if not os.path.isdir(dd_use):
+                        print('Destination not a dir: {}'.format(dd_use))
+                        total_errors += 1
+                        continue
+                    # perform recursive copy/sync
+                    try:
+                        counts = self._sync_dir_to_dest(source_dir, dd_use)
+                        total_created += counts.get('created', 0)
+                        total_updated += counts.get('updated', 0)
+                        total_skipped += counts.get('skipped', 0)
+                        total_errors += counts.get('errors', 0)
+                        self.gStat(f"Synced {source_dir} -> {dd_use} (created={counts.get('created',0)} updated={counts.get('updated',0)} errors={counts.get('errors',0)})", 'black', 'green')
+                    except Exception as e:
+                        total_errors += 1
+                        print('Error syncing {} -> {}: {}'.format(source_dir, dd_use, e))
+                m = f'Sync completed. Created: {total_created} Updated: {total_updated} Skipped: {total_skipped} Errors: {total_errors}'
+                self.gStat(m,'white','blue')
+                print(m)
+                return
+            # Otherwise, original per-file behavior
+            uc = 0
+            mc = 0
+            ac = 0
+            ec = 0
             dwd = twddv  # Destination Work Data
             if self.runDir.find('/') < 0:
                 # conver paths for windows OS
@@ -379,6 +447,10 @@ class win(Frame):
                 sf = swd[:seld]  # Source File (full path)
                 swd = swd[seld+1:]
                 if len(sf) == 0:  # I'll just ignore blank lines
+                    seld = swd.find('\n')
+                    continue
+                # ignore [DIR] entries when not in sink mode
+                if sf.startswith('[DIR]'):
                     seld = swd.find('\n')
                     continue
                 bfn = sf  # Base File Name (or it will be soon)
@@ -397,6 +469,7 @@ class win(Frame):
                     self.gStat('{} Not Found','black','red')
                     ec += 1
                     mb.showerror('File not found:',sf)
+                    seld = swd.find('\n')
                     continue
                 print('Source file Opened')
                 try:
@@ -406,6 +479,7 @@ class win(Frame):
                     print('Error Reading source file:\n{}'.format(e))
                     gStat('Error Reading source file!','black','red')
                     ec += 1
+                    seld = swd.find('\n')
                     continue
                 fo.close()
                 print('Source file {} read sucessfully!'.format(bfn))
@@ -501,6 +575,65 @@ class win(Frame):
             print(m)
             self.gStat(m,'white','blue')
        
+    def _sync_dir_to_dest(self, src_dir, dest_dir):
+        """Recursively sync src_dir into dest_dir. Returns counts dict."""
+        counts = {'created': 0, 'updated': 0, 'skipped': 0, 'errors': 0}
+        if not os.path.isdir(src_dir):
+            raise FileNotFoundError(f"Source directory does not exist: {src_dir}")
+        src_dir = os.path.normpath(src_dir)
+        for root, dirs, files in os.walk(src_dir):
+            rel = os.path.relpath(root, src_dir)
+            if rel == '.':
+                rel = ''
+            target_root = os.path.join(dest_dir, rel) if rel else dest_dir
+            try:
+                os.makedirs(target_root, exist_ok=True)
+            except Exception as e:
+                counts['errors'] += 1
+                print(f"Could not create directory {target_root}: {e}")
+                continue
+            for fname in files:
+                src_f = os.path.join(root, fname)
+                dest_f = os.path.join(target_root, fname)
+                try:
+                    s_mtime = os.path.getmtime(src_f)
+                except Exception as e:
+                    counts['errors'] += 1
+                    print(f"Could not stat source file {src_f}: {e}")
+                    continue
+                if os.path.exists(dest_f):
+                    try:
+                        d_mtime = os.path.getmtime(dest_f)
+                    except Exception:
+                        d_mtime = 0
+                else:
+                    d_mtime = 0
+                if s_mtime <= d_mtime:
+                    counts['skipped'] += 1
+                    continue
+                # copy file (try copy2 then fallback)
+                try:
+                    shutil.copy2(src_f, dest_f)
+                    if d_mtime == 0:
+                        counts['created'] += 1
+                    else:
+                        counts['updated'] += 1
+                except Exception as e:
+                    # fallback to content-only
+                    try:
+                        with open(src_f, 'rb') as sfh, open(dest_f, 'wb') as dfh:
+                            shutil.copyfileobj(sfh, dfh)
+                    except Exception as e2:
+                        counts['errors'] += 1
+                        print(f"Error copying {src_f} -> {dest_f}: {e} -- {e2}")
+                        continue
+                    else:
+                        if d_mtime == 0:
+                            counts['created'] += 1
+                        else:
+                            counts['updated'] += 1
+        return counts
+
 root = Tk() 
 cd = os.getcwd()
 if cd.find('/') > -1:
