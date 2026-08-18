@@ -10,6 +10,7 @@ import os
 import shutil
 import datetime as dt
 import getpass
+import sys
 #import time
 import webbrowser
 # now running from /home/eric/java/js-basics
@@ -247,8 +248,10 @@ class win(Frame):
             ok = False
         if ok:
             self.gStat('Saving Profile: {}'.format(pn))
-            hasExt = re.match(r'\w+\.tup$',pn)
-            if not hasExt: pn = pn + '.tup'
+            # Accept normal profile names (including spaces and punctuation)
+            # and add .tup when it is not already present.
+            if not pn.lower().endswith('.tup'):
+                pn = pn + '.tup'
             pfn = self.tupPath + self.dsc + pn  #full Profile File Name 
             # Handle Text Widgets up front will save to different ext off base profile name
             bfn = pfn[:-4]
@@ -325,9 +328,15 @@ class win(Frame):
             sd = sd + 'END\n'
         #print('twomv = {}'.format(twomv))
         #print('savesd:\n{}'.format(sd))
-        fo = open(pfn,'wt')
-        fo.write(sd)
-        fo.close()
+        try:
+            fo = open(pfn, 'wt')
+            fo.write(sd)
+            fo.close()
+        except Exception as e:
+            self.gStat('Error saving profile: {}'.format(e), 'black', 'red')
+            mb.showerror('Save Profile Error',
+                         'Could not save profile:\n{}\n\n{}'.format(pfn, e))
+            return
         self.gStat('Profile {} Saved.'.format(pn))
     
     def saveFile(self):
@@ -370,8 +379,21 @@ class win(Frame):
     
     def loadProfile(self):
         # Load Values Section
-        # load in any save data (starting off just using a file)        
-        pn = filedialog.askopenfilename(initialdir = self.tupPath, title = 'Select Profile', filetypes = (("Profiles","*.tup"),("all files","*")))
+        # load in any save data (starting off just using a file)
+        pn = filedialog.askopenfilename(
+            initialdir=self.tupPath,
+            title='Select Profile',
+            filetypes=(("Profiles", "*.tup"), ("all files", "*.*"))
+        )
+
+        # Some Tk/file-dialog environments can return an empty value or,
+        # unexpectedly, a tuple.  Do not attempt to open either as a path.
+        if isinstance(pn, (tuple, list)):
+            pn = pn[0] if pn else ''
+        if not isinstance(pn, (str, bytes, os.PathLike)) or not pn:
+            self.gStat('Profile load cancelled.')
+            return
+
         twd = ''  # Text Widget Data
         ldscp = len(pn)  # Last Directory Separator Character Position
         #might not have selected a file..
