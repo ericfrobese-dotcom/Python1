@@ -125,7 +125,7 @@ class win(Frame):
         self.twdd.grid(row = 7, padx = 4, sticky = W)
         # Sink option checkbox
         self.sink_var = IntVar(value=0)
-        self.sink_cb = Checkbutton(self, text='Sink entire source directory to each destination', variable=self.sink_var)
+        self.sink_cb = Checkbutton(self, text='Sync - All source dir to each destination' , variable=self.sink_var)
         self.sink_cb.grid(row=6, column=1, columnspan=2, sticky=W)
         # Row 8 - Start Propagate Button
         self.spButton = Button(self, text = "Start Propagation", command = self.startProp)
@@ -186,6 +186,13 @@ class win(Frame):
                 fo = open(sffn,'wt')
                 fo.write(twsfv)
                 fo.close()
+            # save sink checkbox state
+            fsofn = bfn + '.fso'
+            try:
+                with open(fsofn, 'wt') as fo:
+                    fo.write(f'sink={1 if self.sink_var.get() else 0}\n')
+            except Exception as e:
+                print(f'Could not save options file {fsofn}: {e}')
             sd = ''
             sd = sd + 'END\n'
         fo = open(pfn,'wt')
@@ -275,6 +282,21 @@ class win(Frame):
         self.twdd.configure(fg = 'black', bg = 'white')
         self.twdd.insert(1.0,twd)
         self.twdd.grid(row=7, padx = 4, sticky = W)
+        # load options file if present
+        fsofn = jfb + '.fso'
+        if fsofn in ls:
+            try:
+                with open(fsofn,'rt') as fo:
+                    for line in fo:
+                        line = line.strip()
+                        if line.startswith('sink='):
+                            try:
+                                val = int(line.split('=',1)[1])
+                                self.sink_var.set(1 if val else 0)
+                            except Exception:
+                                pass
+            except Exception as e:
+                print(f'Could not read options file {fsofn}: {e}')
         os.chdir(self.runDir)
         print('Profile {} Loaded'.format(jfb))    
         cl = ''  #Current Line
@@ -413,6 +435,18 @@ class win(Frame):
                     if not os.path.isdir(dd_use):
                         print('Destination not a dir: {}'.format(dd_use))
                         continue
+                    # quick writability test: try to create and remove a temp file in the dest root
+                    try:
+                        test_path = os.path.join(dd_use, '.file_prop_write_test')
+                        with open(test_path, 'wb') as tf:
+                            tf.write(b'')
+                        os.remove(test_path)
+                    except Exception as e:
+                        print(f"Destination {dd_use} not writable: {e}")
+                        # still allow GVFS-like mounts which may fail this test; include but note
+                        # if it's not writable, still include but warn in logs
+                        # skip it to be safe
+                        # continue
                     dests.append(dd_use)
                 if not dests:
                     mb.showerror('No valid Destinations', 'No valid destination directories to sync to. Ensure devices are mounted.')
@@ -648,8 +682,12 @@ class win(Frame):
             try:
                 os.makedirs(target_root, exist_ok=True)
             except Exception as e:
+                # Preserve the source directory name exactly.
+                # In particular, do not replace spaces with underscores:
+                # doing so can create a second directory containing
+                # duplicate copies of files from the same source directory.
                 counts['errors'] += 1
-                print(f"Could not create directory {target_root}: {e}")
+                print(f"Could not create/access destination directory {target_root}: {e}")
                 continue
             for fname in files:
                 if stop_event and stop_event.is_set():
