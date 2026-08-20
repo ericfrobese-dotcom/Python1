@@ -6,6 +6,7 @@ from tkinter import ttk
 import os
 import shutil
 import getpass
+import sys
 import datetime as dt
 import webbrowser
 import re
@@ -65,7 +66,14 @@ class win(Frame):
             debian = 'apt' in ls
             if debian:
                 dn = '/home/'+user+'/Documents'
-                os.chdir(dn)
+                # Some Linux installations do not create ~/Documents.  Use the
+                # directory from which the application was launched in that case.
+                if os.path.isdir(dn) and os.access(dn, os.R_OK | os.W_OK | os.X_OK):
+                    os.chdir(dn)
+                else:
+                    print('Documents directory {} is not available; using run directory {}.'.format(dn, self.runDir))
+                    dn = self.runDir
+                    os.chdir(dn)
                 ls = os.listdir()
                 if 'fpd' not in ls:
                     os.mkdir('fpd')
