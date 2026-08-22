@@ -506,7 +506,8 @@ class win(Frame):
                     e = sys.exc_info()
                     print('Could not open to source file:\n{}'.format(sf))
                     print('Error:\n{}'.format(e))
-                    self.gStat('{} Not Found','black','red')
+                    # EJF 8/21/26 removing 'problem' gStat line
+                    # self.gStat('{} Not Found','black','red')
                     ec += 1
                     mb.showerror('File not found:',sf)
                     seld = swd.find('\n')
