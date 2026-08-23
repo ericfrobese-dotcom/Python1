@@ -59,6 +59,10 @@ class win(Frame):
         #self.bmff = b''  #  Binary Message from file
         self.oa = ''  # ACK msg
         self.fn = ''
+        # Snapshot of the inbound text most recently saved to disk.  Comparing
+        # against this lets us retain manually edited inbound messages as well.
+        self._saved_twim_content = ''
+        self._inbound_filename = ''
         self.df = 'TCP_IP Utility Documentation.pdf'  # Documentation File
         self.destDir = ''
         self.runDir = os.getcwd()  # Run Dir
@@ -342,10 +346,8 @@ class win(Frame):
     def saveFile(self):
         ok = True
         twomv = self.twim.get("1.0",'end-1c')
-        destDir = self.destDirEntry.get()
-        fnOut = self.fnOutEntry.get()
-        os.chdir(destDir)
-        ls = os.listdir()
+        destDir = self.destDirEntry.get().strip()
+        fnOut = self.fnOutEntry.get().strip()
         if len(twomv) == 0:
             mb.showerror('No File data', 'No inbound file loaded to Save')
             ok = False
@@ -355,19 +357,56 @@ class win(Frame):
         elif len(fnOut) == 0:
             mb.showerror('Missing Save file name','Please enter the "Save file name" value')
             ok = False
-        elif fnOut in ls:
-            ok = mb.askyesno('Warning File Exists!','Overwrite File {}?'.format(fnOut),default = 'no')
+        elif not os.path.isdir(destDir):
+            mb.showerror('Invalid Destination Directory',
+                         'The Destination Directory does not exist:\n{}'.format(destDir))
+            ok = False
+        else:
+            ofn = os.path.join(destDir, fnOut)
+            if os.path.exists(ofn):
+                ok = mb.askyesno('Warning File Exists!','Overwrite File {}?'.format(fnOut),default = 'no')
         if ok:
             self.gStat('Saving File')
-            # dsc = '/' if destDir.find('/') > -1 else '\\'  # Directory Separator Character
-            ofn = destDir + self.dsc + fnOut  # Outbound File Name
-            wd = twomv.encode()
-            fo = open(ofn,'wb')
-            fo.write(wd)
-            fo.close()
+            with open(ofn, 'wb') as fo:
+                fo.write(twomv.encode())
             msg = 'Saved: {}'.format(ofn)
+            self.twim.delete('1.0', END)
+            self.fnOutEntry.delete(0, END)
+            self._saved_twim_content = ''
+            self._inbound_filename = ''
             #print(msg)
             self.gStat(msg)
+
+    def _autosave_inbound_message(self):
+        """Save changed inbound text before it is replaced by a new message."""
+        inbound_text = self.twim.get('1.0', 'end-1c')
+        if not inbound_text or inbound_text == self._saved_twim_content:
+            return True
+
+        configured_dir = self.destDirEntry.get().strip()
+        save_dir = configured_dir if configured_dir else home
+        save_dir = os.path.expanduser(save_dir)
+        if not os.path.isdir(save_dir):
+            self.iStat('Inbound autosave failed: directory does not exist: {}'.format(save_dir),
+                       'black', 'red')
+            return False
+
+        if self._inbound_filename:
+            filename = self._inbound_filename
+        else:
+            timestamp = dt.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            filename = 'inbound_{}.txt'.format(timestamp)
+        save_path = os.path.join(save_dir, filename)
+        try:
+            with open(save_path, 'w', encoding='utf-8') as fo:
+                fo.write(inbound_text)
+        except OSError as e:
+            self.iStat('Inbound autosave failed: {}'.format(e), 'black', 'red')
+            return False
+
+        self._saved_twim_content = inbound_text
+        self.gStat('Inbound message autosaved: {}'.format(save_path))
+        return True
     
     def selectDir(self):
         cwd = os.getcwd()
@@ -447,6 +486,7 @@ class win(Frame):
         self.twim.configure(fg = 'black', bg = 'white')
         self.twim.insert(1.0,twd)
         self.twim.grid(row=9, column=1, sticky = W)
+        self._saved_twim_content = twd
         twd = ''
         iafn = jfb + '.tia'
         if iafn in ls:
@@ -711,6 +751,11 @@ class win(Frame):
     def _process_incoming_ui(self, data, client_address):
         # replicate the original per-message handling from listenOnPort's loop
         try:
+            # Do not replace an inbound message until its unsaved contents have
+            # been preserved.  If saving fails, keep the current message visible.
+            if not self._autosave_inbound_message():
+                return
+            self._inbound_filename = ''
             rfnv = self.cb_rfn_var.get()
             data_body = data
             if rfnv == 1:
@@ -726,17 +771,16 @@ class win(Frame):
                         data_body = data[ep+1:nep] if ep != -1 else data[:nep]
                     else:
                         data_body = data[ep+1:] if ep != -1 else data
-                    dsc = '/' if ofn.find('/') > -1 else '\\'
-                    chop = ofn.find(dsc)
-                    while chop > -1:
-                        ofn = ofn[chop+1:]
-                        chop = ofn.find(dsc)
+                    # Senders may use either Windows or POSIX path separators.
+                    ofn = os.path.basename(ofn.replace('\\', '/'))
                     self.fnOutEntry.delete(0,END)
                     self.fnOutEntry.insert(0,ofn)
+                    self._inbound_filename = ofn
             self.twim.delete(1.0,END)
             self.twim.configure(fg = 'black', bg = 'white')
             self.twim.insert(1.0,data_body)
             self.twim.grid(row = 9, column = 1, sticky = W)
+            self._saved_twim_content = ''
             self.iStat(f'Message received from {client_address}','white','green')
         except Exception as e:
             self.iStat(f'Error processing incoming: {e}','black','red')
@@ -815,4 +859,3 @@ else:
     root.geometry('870x520')  # Windows 10
 app = win(root)
 root.mainloop()
-

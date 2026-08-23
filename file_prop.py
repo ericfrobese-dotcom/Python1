@@ -156,7 +156,7 @@ class win(Frame):
                 shutil.move(self.runDir + self.dsc + self.df, self.fpdPath)
             else:
                 mb.showerror('Documentation file Missing',"Can not find document file, sorry.")
-                self.gStat('Documentation file "{}" not found in data directory.'.format(fn),'black','red')
+                #self.gStat('Documentation file "{}" not found in data directory.'.format(fn),'black','red')
                 return
         if self.dsc == '/':  # Use webbrowser to display pdf in linux
             fp = self.fpdPath + '/' + fn  # Full Path doc file
@@ -166,7 +166,7 @@ class win(Frame):
             os.chdir(self.fpdPath)
             os.startfile(fn)
             os.chdir(c)
-        self.gStat('Documenation launched.')
+        #self.gStat('Documenation launched.')
         
     def saveProfile(self):
         pn = self.profileEntry.get()
@@ -175,7 +175,7 @@ class win(Frame):
             mb.showerror('No Profile Name', 'Enter a name in box below "Profile" label')
             ok = False
         if ok:
-            self.gStat('Saving Profile: {}'.format(pn))
+            #self.gStat('Saving Profile: {}'.format(pn))
             hasExt = re.match(r'\w+\.fpp$',pn)
             if not hasExt: pn = pn + '.fpp'
             pfn = self.fpdPath + self.dsc + pn  #full Profile File Name 
@@ -207,7 +207,7 @@ class win(Frame):
         fo.write(sd)
         fo.close()
         print('Profile {} Saved.'.format(pn))
-        self.gStat('Profile {} Saved.'.format(pn))
+        #self.gStat('Profile {} Saved.'.format(pn))
 
     def client_exit(self):
         root.destroy()
@@ -232,7 +232,7 @@ class win(Frame):
         self.twdd.grid(row=7, padx=4, sticky=W)
         m = 'Directory {} added to Destination Directories'.format(dd)
         print(m)
-        self.gStat(m)
+        #self.gStat(m)
     
     def loadProfile(self):
         # Load Values Section
@@ -320,7 +320,7 @@ class win(Frame):
                     eval(cl)
                 except:
                     e = sys.exc_info()
-                    self.gStat('Error on eval()','black','red')
+                    #self.gStat('Error on eval()','black','red')
                     self.ome(e,'white','red')
         # the askopenfilename function always uses '/' as the dsc charater
         chop = pn.find('/')
@@ -329,7 +329,7 @@ class win(Frame):
             chop = pn.find('/')
         pn = pn[:-4]
         print('Parsed screen display profile name = {}'.format(pn))
-        self.gStat('Loaded Profile: {}'.format(pn))
+        #self.gStat('Loaded Profile: {}'.format(pn))
         self.profileEntry.delete(0,END)
         self.profileEntry.insert(0,pn) 
         self.profileEntry.grid(row = 2, sticky = W)   
@@ -340,7 +340,7 @@ class win(Frame):
             return
         self.twsf.insert(END,fn + '\n')
         self.twsf.grid(row = 5, padx = 4, sticky = W)
-        self.gStat('File {} added to Source Files'.format(fn))
+        #self.gStat('File {} added to Source Files'.format(fn))
         print('File {} added to Source Files'.format(fn))
 
     def selectSourceDir(self):
@@ -352,7 +352,7 @@ class win(Frame):
         # mark as source dir in twsf with a prefix so older behavior still works
         self.twsf.insert(END, '[DIR] ' + sd + '\n')
         self.twsf.grid(row = 5, padx = 4, sticky = W)
-        self.gStat('Source directory {} added to Source list'.format(sd))
+        #self.gStat('Source directory {} added to Source list'.format(sd))
         print('Source directory {} added to Source list'.format(sd))
         
     def _normalize_destination(self, dd):
@@ -547,7 +547,7 @@ class win(Frame):
                     if dd.lower().startswith('mtp:') and dd_res == dd:
                         print('Error: MTP path provided but device mount not found for: {}'.format(dd))
                         ec += 1
-                        self.gStat('MTP device not mounted or not accessible: {}'.format(dd),'black','red')
+                        #self.gStat('MTP device not mounted or not accessible: {}'.format(dd),'black','red')
                         mb.showerror('MTP device not mounted', f"Could not resolve MTP path: {dd}\nPlease open the device in your file manager so it is mounted and try again.")
                         deld = dwd.find('\n')
                         continue
@@ -556,7 +556,7 @@ class win(Frame):
                     if not os.path.isdir(dd_use):
                         print('Error: destination directory does not exist: {}'.format(dd_use))
                         ec += 1
-                        self.gStat('Destination Directory {} Not Found'.format(dd_use),'black','red')
+                        #self.gStat('Destination Directory {} Not Found'.format(dd_use),'black','red')
                         mb.showerror('Directory not found:',dd_use)
                         deld = dwd.find('\n')
                         continue
@@ -565,7 +565,7 @@ class win(Frame):
                     except Exception as e:
                         print('Error listing destination directory {}: {}'.format(dd_use, e))
                         ec += 1
-                        self.gStat('Unable to read Destination Directory {}'.format(dd_use),'black','red')
+                        #self.gStat('Unable to read Destination Directory {}'.format(dd_use),'black','red')
                         mb.showerror('Directory not readable:', dd_use)
                         deld = dwd.find('\n')
                         continue
@@ -596,7 +596,7 @@ class win(Frame):
                             except Exception as e2:
                                 ec += 1
                                 print('<< Error copying to Destination File>>\n{} -- {}'.format(e, e2))
-                                self.gStat('Error copying to {}'.format(fdn), 'black', 'red')
+                                #self.gStat('Error copying to {}'.format(fdn), 'black', 'red')
                                 deld = dwd.find('\n')
                                 continue
                         m = '>> {}{}{}'.format(bfn, v, dd_use)
@@ -605,16 +605,16 @@ class win(Frame):
                             uc += 1
                         else:
                             mc += 1
-                        self.gStat(m,'black', 'green')
+                        #self.gStat(m,'black', 'green')
                     else:
                         m = '{} Up to date'.format(fdn)
                         print(m)
                         ac += 1
-                        self.gStat(m,'black','Yellow')
+                        #self.gStat(m,'black','Yellow')
                     deld = dwd.find('\n')
             m = 'Created: {}  Updated: {}  Not Old: {}  Errors: {}'.format(mc,uc,ac,ec)
             print(m)
-            self.gStat(m,'white','blue')
+            #self.gStat(m,'white','blue')
        
     def _start_sync_thread(self, source_dir, dests, total_files):
         # Create progress window
