@@ -143,6 +143,37 @@ class win(Frame):
         self.status.set(msg)
         self.status_label.config(bg = b, fg = f)
         self.status_label.grid(row = 4, padx = 4)
+
+    def _show_propagation_errors(self, errors):
+        """Display every error from one propagation run in a single popup."""
+        if not errors:
+            return
+
+        popup = Toplevel(self.master)
+        popup.title('Propagation Errors ({})'.format(len(errors)))
+        popup.transient(self.master)
+        Label(popup, text='Source file/directory, destination directory, and error details:').pack(
+            padx=8, pady=(8, 4), anchor=W)
+        frame = Frame(popup)
+        frame.pack(fill=BOTH, expand=True, padx=8, pady=4)
+        scrollbar = Scrollbar(frame)
+        scrollbar.pack(side=RIGHT, fill=Y)
+        details = Text(frame, width=120, height=20, wrap=WORD, yscrollcommand=scrollbar.set)
+        details.pack(side=LEFT, fill=BOTH, expand=True)
+        scrollbar.config(command=details.yview)
+        for number, error in enumerate(errors, start=1):
+            details.insert(END, '{}. Source: {}\n   Destination: {}\n   Error: {}\n\n'.format(
+                number, error['source'], error['destination'], error['detail']))
+        details.config(state=DISABLED)
+        Button(popup, text='Close', command=popup.destroy).pack(pady=(0, 8))
+
+    @staticmethod
+    def _propagation_error(errors, source, destination, detail):
+        errors.append({
+            'source': source or '(not available)',
+            'destination': destination or '(not available)',
+            'detail': str(detail),
+        })
         
     def viewDoc(self):
         fn = self.df  # Documentation file
@@ -412,6 +443,7 @@ class win(Frame):
             mb.showerror('No Destination Dir', 'No Destination Directory values entered.')
             ok = False
         if ok:
+            propagation_errors = []
             uc = 0  # Updated Count
             mc = 0  # Move Count
             ac = 0  # Already up to date Count
@@ -439,9 +471,13 @@ class win(Frame):
                     dd_use = dd_res if dd_res != dd and os.path.isdir(dd_res) else dd
                     if dd.lower().startswith('mtp:') and dd_res == dd:
                         print('Skipping MTP destination not mounted: {}'.format(dd))
+                        self._propagation_error(propagation_errors, source_dir, dd,
+                                                'MTP device is not mounted or could not be resolved.')
                         continue
                     if not os.path.isdir(dd_use):
                         print('Destination not a dir: {}'.format(dd_use))
+                        self._propagation_error(propagation_errors, source_dir, dd,
+                                                'Destination directory does not exist or is not accessible.')
                         continue
                     # quick writability test: try to create and remove a temp file in the dest root
                     try:
@@ -451,12 +487,15 @@ class win(Frame):
                         os.remove(test_path)
                     except Exception as e:
                         print(f"Destination {dd_use} not writable: {e}")
+                        self._propagation_error(propagation_errors, source_dir, dd_use,
+                                                'Destination write test failed: {}'.format(e))
                         # still allow GVFS-like mounts which may fail this test; include but note
                         # if it's not writable, still include but warn in logs
                         # skip it to be safe
                         # continue
                     dests.append(dd_use)
                 if not dests:
+                    self._show_propagation_errors(propagation_errors)
                     mb.showerror('No valid Destinations', 'No valid destination directories to sync to. Ensure devices are mounted.')
                     return
                 # count total files for progress
@@ -464,7 +503,7 @@ class win(Frame):
                 for _root, _dirs, files in os.walk(source_dir):
                     total_files += len(files)
                 # start background thread to perform sync and show progress UI
-                self._start_sync_thread(source_dir, dests, total_files)
+                self._start_sync_thread(source_dir, dests, total_files, propagation_errors)
                 return
 
             # Otherwise, original per-file behavior
@@ -509,7 +548,7 @@ class win(Frame):
                     # EJF 8/21/26 removing 'problem' gStat line
                     # self.gStat('{} Not Found','black','red')
                     ec += 1
-                    mb.showerror('File not found:',sf)
+                    self._propagation_error(propagation_errors, sf, '', e)
                     seld = swd.find('\n')
                     continue
                 print('Source file Opened')
@@ -518,13 +557,21 @@ class win(Frame):
                 except:
                     e = sys.exc_info()
                     print('Error Reading source file:\n{}'.format(e))
-                    gStat('Error Reading source file!','black','red')
+                    self.gStat('Error Reading source file!','black','red')
                     ec += 1
+                    self._propagation_error(propagation_errors, sf, '', e)
                     seld = swd.find('\n')
                     continue
-                fo.close()
+                finally:
+                    fo.close()
                 print('Source file {} read sucessfully!'.format(bfn))
-                sflmt = os.path.getmtime(sf)  # Source File Last Modified Time
+                try:
+                    sflmt = os.path.getmtime(sf)  # Source File Last Modified Time
+                except OSError as e:
+                    ec += 1
+                    self.gStat('Unable to read source file timestamp: {}'.format(sf), 'black', 'red')
+                    self._propagation_error(propagation_errors, sf, '', e)
+                    continue
                 print('Source file timestamp: {}'.format(sflmt))
                 its = int(sflmt)  # Integer Time Stamp
                 print(dt.datetime.fromtimestamp(its).strftime('%Y-%m-%d %H:%M:%S'))
@@ -548,7 +595,8 @@ class win(Frame):
                         print('Error: MTP path provided but device mount not found for: {}'.format(dd))
                         ec += 1
                         self.gStat('MTP device not mounted or not accessible: {}'.format(dd),'black','red')
-                        mb.showerror('MTP device not mounted', f"Could not resolve MTP path: {dd}\nPlease open the device in your file manager so it is mounted and try again.")
+                        self._propagation_error(propagation_errors, sf, dd,
+                                                'MTP device is not mounted or could not be resolved.')
                         deld = dwd.find('\n')
                         continue
                     fdn = os.path.join(dd_use, bfn)  # Full Dest Name
@@ -557,7 +605,8 @@ class win(Frame):
                         print('Error: destination directory does not exist: {}'.format(dd_use))
                         ec += 1
                         self.gStat('Destination Directory {} Not Found'.format(dd_use),'black','red')
-                        mb.showerror('Directory not found:',dd_use)
+                        self._propagation_error(propagation_errors, sf, dd_use,
+                                                'Destination directory does not exist or is not accessible.')
                         deld = dwd.find('\n')
                         continue
                     try:
@@ -566,7 +615,7 @@ class win(Frame):
                         print('Error listing destination directory {}: {}'.format(dd_use, e))
                         ec += 1
                         self.gStat('Unable to read Destination Directory {}'.format(dd_use),'black','red')
-                        mb.showerror('Directory not readable:', dd_use)
+                        self._propagation_error(propagation_errors, sf, dd_use, e)
                         deld = dwd.find('\n')
                         continue
                     if bfn in ls:
@@ -597,6 +646,8 @@ class win(Frame):
                                 ec += 1
                                 print('<< Error copying to Destination File>>\n{} -- {}'.format(e, e2))
                                 self.gStat('Error copying to {}'.format(fdn), 'black', 'red')
+                                self._propagation_error(propagation_errors, sf, dd_use,
+                                                        'copy2 failed: {}; fallback copy failed: {}'.format(e, e2))
                                 deld = dwd.find('\n')
                                 continue
                         m = '>> {}{}{}'.format(bfn, v, dd_use)
@@ -615,8 +666,9 @@ class win(Frame):
             m = 'Created: {}  Updated: {}  Not Old: {}  Errors: {}'.format(mc,uc,ac,ec)
             print(m)
             self.gStat(m,'white','blue')
-       
-    def _start_sync_thread(self, source_dir, dests, total_files):
+            self._show_propagation_errors(propagation_errors)
+
+    def _start_sync_thread(self, source_dir, dests, total_files, propagation_errors=None):
         # Create progress window
         pw = Toplevel(self.master)
         pw.title('Sync Progress')
@@ -633,6 +685,7 @@ class win(Frame):
         Button(pw, text='Cancel', command=on_cancel).grid(row=3, column=0, padx=8, pady=6)
         pw.transient(self.master)
         pw.grab_set()
+        errors = list(propagation_errors or [])
 
         def progress_cb_factory(pv, sl):
             # pv is IntVar, sl is Label
@@ -653,7 +706,9 @@ class win(Frame):
                 self.master.after(1, lambda: progress_var.set(0))
                 cb = progress_cb_factory(progress_var, status_label)
                 try:
-                    counts = self._sync_dir_to_dest(source_dir, dd, progress_callback=cb, total_files=total_files, stop_event=cancel_event)
+                    counts = self._sync_dir_to_dest(
+                        source_dir, dd, progress_callback=cb, total_files=total_files,
+                        stop_event=cancel_event, error_details=errors)
                     total_created += counts.get('created',0)
                     total_updated += counts.get('updated',0)
                     total_skipped += counts.get('skipped',0)
@@ -661,17 +716,20 @@ class win(Frame):
                 except Exception as e:
                     total_errors += 1
                     print('Error syncing {} -> {}: {}'.format(source_dir, dd, e))
+                    self._propagation_error(errors, source_dir, dd, e)
             # finalize
-            summary = f'Sync finished. Created:{total_created} Updated:{total_updated} Skipped:{total_skipped} Errors:{total_errors}'
+            summary = f'Sync finished. Created:{total_created} Updated:{total_updated} Skipped:{total_skipped} Errors:{len(errors)}'
             def finish():
                 status_label.config(text=summary)
                 Button(pw, text='Close', command=pw.destroy).grid(row=4, column=0, padx=8, pady=6)
                 pw.grab_release()
+                self._show_propagation_errors(errors)
             self.master.after(1, finish)
         th = threading.Thread(target=worker, daemon=True)
         th.start()
 
-    def _sync_dir_to_dest(self, src_dir, dest_dir, progress_callback=None, total_files=None, stop_event=None):
+    def _sync_dir_to_dest(self, src_dir, dest_dir, progress_callback=None, total_files=None,
+                          stop_event=None, error_details=None):
         """Recursively sync src_dir into dest_dir. Returns counts dict.
         progress_callback(processed_count, total_files, current_file) optional.
         stop_event is threading.Event to allow cancellation.
@@ -697,6 +755,8 @@ class win(Frame):
                 # duplicate copies of files from the same source directory.
                 counts['errors'] += 1
                 print(f"Could not create/access destination directory {target_root}: {e}")
+                if error_details is not None:
+                    self._propagation_error(error_details, root, target_root, e)
                 continue
             for fname in files:
                 if stop_event and stop_event.is_set():
@@ -708,6 +768,8 @@ class win(Frame):
                 except Exception as e:
                     counts['errors'] += 1
                     print(f"Could not stat source file {src_f}: {e}")
+                    if error_details is not None:
+                        self._propagation_error(error_details, src_f, dest_f, e)
                     continue
                 if os.path.exists(dest_f):
                     try:
@@ -737,6 +799,10 @@ class win(Frame):
                     except Exception as e2:
                         counts['errors'] += 1
                         print(f"Error copying {src_f} -> {dest_f}: {e} -- {e2}")
+                        if error_details is not None:
+                            self._propagation_error(
+                                error_details, src_f, dest_f,
+                                'copy2 failed: {}; fallback copy failed: {}'.format(e, e2))
                         processed += 1
                         if progress_callback:
                             progress_callback(processed, total_files, src_f)
