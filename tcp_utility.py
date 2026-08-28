@@ -13,6 +13,10 @@ import getpass
 import sys
 #import time
 import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib import error as urlerror
+from urllib import request as urlrequest
+from urllib.parse import urlparse
 # now running from /home/eric/java/js-basics
 #setRunDir = True
 setRunDir = False
@@ -59,6 +63,7 @@ class win(Frame):
         #self.bmff = b''  #  Binary Message from file
         self.oa = ''  # ACK msg
         self.fn = ''
+        self.rest_receive_queue = _queue.Queue()
         # Snapshot of the inbound text most recently saved to disk.  Comparing
         # against this lets us retain manually edited inbound messages as well.
         self._saved_twim_content = ''
@@ -132,6 +137,23 @@ class win(Frame):
         self.profileEntry.grid(row = 2, column=1, pady = 4, sticky = S)
         self.SaveProfileButton = Button(self, text = 'Save Profile', command = self.saveProfile)
         self.SaveProfileButton.grid(row = 2, column = 1, sticky = E)
+        # REST settings.  TCP/MLLP remains the default transport so existing
+        # profiles and workflows continue to work unchanged.
+        self.use_rest_var = IntVar(value=0)
+        self.use_rest = Checkbutton(self, text='Use REST API (instead of TCP/MLLP)',
+                                    variable=self.use_rest_var,
+                                    command=self._update_transport_labels)
+        self.use_rest.grid(row=13, column=0, sticky=W)
+        self.restUrlLabel = Label(self, text='REST Endpoint')
+        self.restUrlLabel.grid(row=14, column=0, sticky=E)
+        self.restUrlEntry = Entry(self, width=80)
+        self.restUrlEntry.grid(row=14, column=1, sticky=W)
+        self.restTokenLabel = Label(self, text='Bearer Token')
+        self.restTokenLabel.grid(row=15, column=0, sticky=E)
+        self.restTokenEntry = Entry(self, width=80, show='*')
+        self.restTokenEntry.grid(row=15, column=1, sticky=W)
+        self.restFetchButton = Button(self, text='REST Fetch', command=self.receiveFromRest)
+        self.restFetchButton.grid(row=13, column=2, sticky=W)
         # Row 3
         self.label_cf = Label(self, text = "Load msg from file:")
         self.label_cf.grid(row = 3, column = 0)
@@ -197,6 +219,17 @@ class win(Frame):
         self.fnOutEntry.grid(row=12, column = 1, sticky = W)
         self.saveFileButton = Button(self, text = 'Save Inbound File', command = self.saveFile)
         self.saveFileButton.grid(row=12, column = 2, sticky = W)
+
+    def _update_transport_labels(self):
+        """Make the shared controls describe their REST action when selected."""
+        if self.use_rest_var.get() == 1:
+            self.sendButton.config(text='REST Send')
+            if not getattr(self, 'listener_thread', None) or not self.listener_thread.is_alive():
+                self.listenButton.config(text='REST Host', command=self.listenOnPort)
+        else:
+            self.sendButton.config(text='Send')
+            if not getattr(self, 'listener_thread', None) or not self.listener_thread.is_alive():
+                self.listenButton.config(text='Listen', command=self.listenOnPort)
 
     def ome(self, msg , f = 'white', b = 'red'):  # Outbound Message Error
         self.twAckRec.delete(1.0,END)
@@ -329,6 +362,14 @@ class win(Frame):
                 sd = sd + 'self.fnOutEntry.delete(0,END)\n'
                 sd = sd + 'self.fnOutEntry.insert(0,"{}")\n'.format(sfn)
                 sd = sd + 'self.fnOutEntry.grid(row=12,column=1, sticky = W)\n'
+            rest_enabled = self.use_rest_var.get()
+            sd = sd + 'self.use_rest_var.set({})\n'.format(rest_enabled)
+            rest_url = self.restUrlEntry.get()
+            if rest_url:
+                sd = sd + 'self.restUrlEntry.delete(0,END)\n'
+                sd = sd + 'self.restUrlEntry.insert(0, {!r})\n'.format(rest_url)
+            # Tokens are intentionally not included in profiles because profile
+            # files are plain text and may be copied or shared.
             sd = sd + 'END\n'
         #print('twomv = {}'.format(twomv))
         #print('savesd:\n{}'.format(sd))
@@ -526,6 +567,7 @@ class win(Frame):
         self.profileEntry.delete(0,END)
         self.profileEntry.insert(0,pn) 
         self.profileEntry.grid(row = 2, column=1, sticky = S)   
+        self._update_transport_labels()
             
     def chooseFile(self):
         self.fn = filedialog.askopenfilename(parent = self,initialdir = self.runDir, title = 'Choose File', filetypes = (("all files","*"),("all files","*.*")))
@@ -552,13 +594,166 @@ class win(Frame):
             print(e)
             self.gStat(msg,'black','red')
         
+    def _rest_endpoint(self):
+        """Return a validated HTTP(S) endpoint, or show a useful GUI error."""
+        endpoint = self.restUrlEntry.get().strip()
+        parsed = urlparse(endpoint)
+        if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+            mb.showerror('Invalid REST endpoint',
+                         'Enter a complete HTTP or HTTPS endpoint, for example:\n'
+                         'https://example.org/api/hl7')
+            return None
+        return endpoint
+
+    def _rest_headers(self, content_type=None):
+        headers = {'Accept': 'application/hl7-v2, application/octet-stream, text/plain, */*'}
+        if content_type:
+            headers['Content-Type'] = content_type
+        token = self.restTokenEntry.get().strip()
+        if token:
+            headers['Authorization'] = 'Bearer {}'.format(token)
+        if self.cb_sfn_var.get() == 1 and self.fn:
+            headers['X-Filename'] = os.path.basename(self.fn)
+        return headers
+
+    def _send_rest_message(self, message):
+        endpoint = self._rest_endpoint()
+        if not endpoint:
+            return
+        # REST APIs generally expect the HL7 payload itself, without the MLLP
+        # framing bytes used by the TCP transport.
+        payload = message.encode('utf-8')
+        content_type = 'application/hl7-v2' if 'MSH' in message else 'application/octet-stream'
+        request = urlrequest.Request(endpoint, data=payload,
+                                     headers=self._rest_headers(content_type), method='POST')
+        self.gStat('Sending REST POST...', 'white', 'green')
+        try:
+            with urlrequest.urlopen(request, timeout=30) as response:
+                response_body = response.read().decode('utf-8', errors='replace')
+                status = '{} {}'.format(response.status, response.reason)
+        except urlerror.HTTPError as exc:
+            detail = exc.read().decode('utf-8', errors='replace')
+            self.gStat('REST request failed: HTTP {}'.format(exc.code), 'black', 'red')
+            self.ome('HTTP {}: {}'.format(exc.code, detail or exc.reason), 'black', 'red')
+            return
+        except (urlerror.URLError, OSError) as exc:
+            self.gStat('REST request failed', 'black', 'red')
+            self.ome(str(exc), 'black', 'red')
+            return
+        self.gStat('REST message sent ({})'.format(status), 'white', 'green')
+        if self.cb_getAck_var.get() == 1:
+            self.twAckRec.delete('1.0', END)
+            self.twAckRec.configure(fg='black', bg='white')
+            self.twAckRec.insert('1.0', response_body)
+
+    def _rest_receive_thread(self, endpoint, headers):
+        try:
+            request = urlrequest.Request(endpoint, headers=headers, method='GET')
+            with urlrequest.urlopen(request, timeout=30) as response:
+                body = response.read().decode('utf-8', errors='replace')
+                self.rest_receive_queue.put(('message', body, response.geturl(), response.status))
+        except urlerror.HTTPError as exc:
+            detail = exc.read().decode('utf-8', errors='replace')
+            self.rest_receive_queue.put(('error', 'HTTP {}: {}'.format(exc.code, detail or exc.reason)))
+        except (urlerror.URLError, OSError) as exc:
+            self.rest_receive_queue.put(('error', str(exc)))
+
+    def receiveFromRest(self):
+        endpoint = self._rest_endpoint()
+        if not endpoint:
+            return
+        self.listenButton.config(state='disabled')
+        self.iStat('Retrieving REST message...', 'white', 'green')
+        thread = threading.Thread(target=self._rest_receive_thread,
+                                  args=(endpoint, self._rest_headers()), daemon=True)
+        thread.start()
+        self.after(100, self._poll_rest_receive)
+
+    def _poll_rest_receive(self):
+        try:
+            kind, *contents = self.rest_receive_queue.get_nowait()
+        except _queue.Empty:
+            self.after(100, self._poll_rest_receive)
+            return
+        self.listenButton.config(state='normal')
+        if kind == 'error':
+            self.iStat('REST receive failed', 'black', 'red')
+            self.ime(contents[0], 'black', 'red')
+            return
+        data, source, status = contents
+        self._process_incoming_ui(data, 'REST {} ({})'.format(source, status))
+
+    def _start_rest_server(self, port, expected_token, send_ack, ack_text):
+        """Start a loopback-only REST receiver without touching Tk from its thread."""
+        inbound_queue = self.listener_queue
+
+        class RestHandler(BaseHTTPRequestHandler):
+            def _authorized(handler):
+                if not expected_token:
+                    return True
+                return handler.headers.get('Authorization', '') == 'Bearer {}'.format(expected_token)
+
+            def _reply(handler, status, body=b'', content_type='text/plain; charset=utf-8'):
+                handler.send_response(status)
+                handler.send_header('Content-Type', content_type)
+                handler.send_header('Content-Length', str(len(body)))
+                handler.end_headers()
+                if body:
+                    handler.wfile.write(body)
+
+            def do_GET(handler):
+                # A simple health endpoint makes it easy to verify the local host.
+                handler._reply(200, b'TCP/IP Utility REST endpoint is running. POST HL7 or file data here.\n')
+
+            def do_POST(handler):
+                if not handler._authorized():
+                    handler._reply(401, b'Unauthorized\n')
+                    return
+                try:
+                    content_length = int(handler.headers.get('Content-Length', '0'))
+                    if content_length < 0 or content_length > 50 * 1024 * 1024:
+                        raise ValueError('content length must be between 0 and 50 MB')
+                    raw_body = handler.rfile.read(content_length)
+                except (ValueError, OSError) as exc:
+                    handler._reply(400, 'Invalid request body: {}'.format(exc).encode('utf-8'))
+                    return
+                body = raw_body.decode('utf-8', errors='replace')
+                filename = handler.headers.get('X-Filename', '')
+                inbound_queue.put((body, handler.client_address, filename))
+                if send_ack:
+                    response = (ack_text or 'ACK').encode('utf-8')
+                    content_type = 'application/hl7-v2; charset=utf-8' if 'MSH' in (ack_text or '') else 'text/plain; charset=utf-8'
+                else:
+                    response = b''
+                    content_type = 'text/plain; charset=utf-8'
+                handler._reply(200, response, content_type)
+
+            def log_message(handler, format, *args):
+                # Avoid printing every HTTP request to the console.
+                return
+
+        try:
+            self.rest_server = ThreadingHTTPServer(('0.0.0.0', port), RestHandler)
+            self.rest_server.timeout = 0.5
+        except OSError as exc:
+            inbound_queue.put(('__error__', 'Failed to start REST host: {}'.format(exc)))
+            return
+        try:
+            self.rest_server.serve_forever(poll_interval=0.25)
+        finally:
+            self.rest_server.server_close()
+            self.rest_server = None
+
     def sendMsg(self):
         ok = True
         twomv = self.twom.get("1.0",'end-1c')
-        if len(self.oipEntry.get()) == 0:
+        use_rest = self.use_rest_var.get() == 1
+        if use_rest and not self._rest_endpoint():
+            ok = False
+        elif not use_rest and len(self.oipEntry.get()) == 0:
             mb.showerror('"Send to" Ip Address missing', 'Enter the IP address of the listening application')
             ok = False
-        elif len(self.opEntry.get()) == 0:
+        elif not use_rest and len(self.opEntry.get()) == 0:
             mb.showerror('"Send to" Port vale missiing', 'Enter the outbound port value')
             ok = False
         elif len(twomv) == 0:
@@ -567,6 +762,9 @@ class win(Frame):
         if ok:
             self.twAckRec.delete('1.0',END)
             self.twAckRec.configure(fg = 'black', bg = 'white')
+            if use_rest:
+                self._send_rest_message(twomv)
+                return
             #print('sendMsg entered')
             #self.twAckRec.grid(row = 6, column = 1, sticky = W)
             if twomv[0] == chr(11):
@@ -691,6 +889,21 @@ class win(Frame):
         # create inter-thread queue and stop event
         self.listener_queue = _queue.Queue()
         self.listener_stop = threading.Event()
+        if self.use_rest_var.get() == 1:
+            # Read all Tk values on the UI thread; the web-server thread only
+            # uses these immutable snapshots.
+            expected_token = self.restTokenEntry.get().strip()
+            send_ack = self.cb_sendAck_var.get() == 1
+            ack_text = self.twia.get('1.0', 'end-1c') if send_ack else ''
+            self.listener_thread = threading.Thread(target=self._start_rest_server,
+                                                    args=(port, expected_token, send_ack, ack_text),
+                                                    daemon=True)
+            self.listener_thread.start()
+            self.listenButton.config(text='Stop REST Host', command=self.stop_listener)
+            self.status.set('Started REST host at http://0.0.0.0:{}/'.format(port))
+            self.status_label.config(bg='green', fg='white')
+            self.after(200, self._poll_listener_queue)
+            return
         send_ack = True if self.cb_sendAck_var.get() == 1 else False
         # start listener thread
         self.listener_thread = threading.Thread(target=self._listener_thread_main, args=(port, self.listener_queue, self.listener_stop, send_ack), daemon=True)
@@ -713,9 +926,10 @@ class win(Frame):
                 if isinstance(item, tuple) and item[0] == '__error__':
                     self.status.set('Listener error: ' + str(item[1]))
                     continue
-                data, addr = item
+                data, addr = item[:2]
+                filename = item[2] if len(item) > 2 else ''
                 # process incoming on main thread
-                self._process_incoming_ui(data, addr)
+                self._process_incoming_ui(data, addr, filename)
         except Exception:
             # ignore transient errors
             pass
@@ -724,7 +938,7 @@ class win(Frame):
             self.after(200, self._poll_listener_queue)
         else:
             # ensure UI button reset
-            self.listenButton.config(text='Listen', command=self.listenOnPort)
+            self._update_transport_labels()
             self.status.set('Listener stopped')
             self.status_label.config(bg='blue', fg='white')
 
@@ -733,6 +947,9 @@ class win(Frame):
             self.listener_stop.set()
             self.status.set('Stopping listener...')
             self.listenButton.config(state='disabled')
+            rest_server = getattr(self, 'rest_server', None)
+            if rest_server is not None:
+                rest_server.shutdown()
             # give thread a moment to exit
             self.after(500, self._finish_stop)
         else:
@@ -744,11 +961,14 @@ class win(Frame):
                 self.listener_thread.join(timeout=0.5)
         except Exception:
             pass
-        self.listenButton.config(text='Listen', command=self.listenOnPort, state='normal')
+        if self.use_rest_var.get() == 1:
+            self.listenButton.config(text='REST Host', command=self.listenOnPort, state='normal')
+        else:
+            self.listenButton.config(text='Listen', command=self.listenOnPort, state='normal')
         self.status.set('Listener stopped')
         self.status_label.config(bg='blue', fg='white')
 
-    def _process_incoming_ui(self, data, client_address):
+    def _process_incoming_ui(self, data, client_address, supplied_filename=''):
         # replicate the original per-message handling from listenOnPort's loop
         try:
             # Do not replace an inbound message until its unsaved contents have
@@ -758,6 +978,11 @@ class win(Frame):
             self._inbound_filename = ''
             rfnv = self.cb_rfn_var.get()
             data_body = data
+            if supplied_filename and rfnv == 1:
+                ofn = os.path.basename(supplied_filename.replace('\\', '/'))
+                self.fnOutEntry.delete(0, END)
+                self.fnOutEntry.insert(0, ofn)
+                self._inbound_filename = ofn
             if rfnv == 1:
                 sp = data.find('filename:')
                 if sp != -1:
@@ -854,8 +1079,8 @@ class win(Frame):
 root = Tk() 
 cd = os.getcwd()
 if cd.find('/') > -1:
-    root.geometry('950x555')  # linux Debian 10
+    root.geometry('1100x650')  # linux Debian 10
 else:
-    root.geometry('870x520')  # Windows 10
+    root.geometry('1020x620')  # Windows 10
 app = win(root)
 root.mainloop()
