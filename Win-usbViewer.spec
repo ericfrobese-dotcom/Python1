@@ -4,7 +4,7 @@ block_cipher = None
 
 
 a = Analysis(['Win-usbViewer.py'],
-             pathex=['C:\\Users\\Owner\\OneDrive\\Documents'],
+             pathex=['C:\\Users\\Owner\\OneDrive\\Documents\\Python\\Python1'],
              binaries=[],
              datas=[],
              hiddenimports=[],
@@ -30,4 +30,4 @@ exe = EXE(pyz,
           upx=True,
           upx_exclude=[],
           runtime_tmpdir=None,
-          console=False )
+          console=True )
