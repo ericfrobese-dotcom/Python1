@@ -25,10 +25,11 @@ except ImportError as error:
     AUDIO_IMPORT_ERROR = error
 
 
-SLOTS = [
+DEFAULT_LABELS = [
     "Applause", "Laughter", "Failure", "Surprise", "Gunshot(s)", "Yell",
     "Custom 1", "Custom 2", "Custom 3",
 ]
+SLOTS = [f"slot_{number}" for number in range(1, len(DEFAULT_LABELS) + 1)]
 APP_DIR = Path.home() / ".digital_soundboard"
 SETTINGS_FILE = APP_DIR / "settings.json"
 
@@ -192,6 +193,10 @@ class Soundboard(tk.Tk):
         self._meter_events: queue.SimpleQueue[tuple[str, float]] = queue.SimpleQueue()
         self.engine = AudioEngine(self._set_status_threadsafe, self._queue_level)
         self.files = {slot: "" for slot in SLOTS}
+        self.label_vars = {
+            slot: tk.StringVar(value=label)
+            for slot, label in zip(SLOTS, DEFAULT_LABELS)
+        }
         self.file_labels: dict[str, ttk.Label] = {}
         self.output_var = tk.StringVar()
         self.input_var = tk.StringVar()
@@ -241,10 +246,11 @@ class Soundboard(tk.Tk):
             cell = ttk.Frame(board, padding=5)
             cell.grid(row=row, column=column, sticky="nsew")
             board.columnconfigure(column, weight=1)
-            ttk.Button(cell, text=slot, command=lambda name=slot: self._play_slot(name), width=20).grid(row=0, column=0, sticky="ew")
-            ttk.Button(cell, text="Choose clip…", command=lambda name=slot: self._choose_clip(name)).grid(row=1, column=0, sticky="ew", pady=(4, 0))
+            ttk.Button(cell, textvariable=self.label_vars[slot], command=lambda name=slot: self._play_slot(name), width=20).grid(row=0, column=0, sticky="ew")
+            ttk.Entry(cell, textvariable=self.label_vars[slot], justify="center").grid(row=1, column=0, sticky="ew", pady=(4, 0))
+            ttk.Button(cell, text="Choose clip…", command=lambda name=slot: self._choose_clip(name)).grid(row=2, column=0, sticky="ew", pady=(4, 0))
             label = ttk.Label(cell, text="No clip selected", foreground="#666666", wraplength=215)
-            label.grid(row=2, column=0, sticky="ew", pady=(3, 0))
+            label.grid(row=3, column=0, sticky="ew", pady=(3, 0))
             self.file_labels[slot] = label
 
         footer = ttk.Frame(root)
@@ -289,29 +295,31 @@ class Soundboard(tk.Tk):
         self.engine.set_levels(self.output_level.get() / 100, self.microphone_level.get() / 100)
 
     def _choose_clip(self, slot: str):
-        filename = filedialog.askopenfilename(title=f"Choose {slot} sound", filetypes=[("Audio files", "*.wav *.flac *.ogg *.mp3 *.aiff *.aif"), ("All files", "*.*")])
+        name = self.label_vars[slot].get().strip() or "sound effect"
+        filename = filedialog.askopenfilename(title=f"Choose {name} sound", filetypes=[("Audio files", "*.wav *.flac *.ogg *.mp3 *.aiff *.aif"), ("All files", "*.*")])
         if filename:
             self.files[slot] = filename
             self.file_labels[slot].config(text=Path(filename).name, foreground="#222222")
 
     def _play_slot(self, slot: str):
+        name = self.label_vars[slot].get().strip() or "sound effect"
         filename = self.files[slot]
         if not filename:
-            messagebox.showinfo("Choose a clip", f"Choose an audio file for {slot} first.")
+            messagebox.showinfo("Choose a clip", f"Choose an audio file for {name} first.")
             return
         if not Path(filename).is_file():
             messagebox.showerror("Missing clip", f"This audio file no longer exists:\n{filename}")
             return
         try:
             self.engine.play(filename)
-            self.status_var.set(f"Playing {slot}")
+            self.status_var.set(f"Playing {name}")
         except Exception as error:
             messagebox.showerror("Could not play sound", str(error))
 
     def _save_settings(self):
         try:
             APP_DIR.mkdir(exist_ok=True)
-            SETTINGS_FILE.write_text(json.dumps({"files": self.files, "output": self.output_var.get(), "input": self.input_var.get(), "output_level": self.output_level.get(), "microphone_level": self.microphone_level.get()}, indent=2), encoding="utf-8")
+            SETTINGS_FILE.write_text(json.dumps({"files": self.files, "labels": {slot: variable.get() for slot, variable in self.label_vars.items()}, "output": self.output_var.get(), "input": self.input_var.get(), "output_level": self.output_level.get(), "microphone_level": self.microphone_level.get()}, indent=2), encoding="utf-8")
             self.status_var.set("Configuration saved")
         except OSError as error:
             messagebox.showerror("Save configuration", str(error))
@@ -321,7 +329,16 @@ class Soundboard(tk.Tk):
             return
         try:
             settings = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            self.files.update({slot: settings.get("files", {}).get(slot, "") for slot in SLOTS})
+            saved_files = settings.get("files", {})
+            # Also accept configurations written by versions that used the
+            # visible button text itself as the slot key.
+            self.files.update({
+                slot: saved_files.get(slot, saved_files.get(default_label, ""))
+                for slot, default_label in zip(SLOTS, DEFAULT_LABELS)
+            })
+            saved_labels = settings.get("labels", {})
+            for slot in SLOTS:
+                self.label_vars[slot].set(saved_labels.get(slot, self.label_vars[slot].get()))
             for slot, filename in self.files.items():
                 if filename:
                     self.file_labels[slot].config(text=Path(filename).name, foreground="#222222")
