@@ -50,7 +50,7 @@ class AudioEngine:
         self.output_device = None
         self.input_device = None
         self.output_level = 0.85
-        self.microphone_level = 0.0
+        self.microphone_level = 1.0
         self._clips: list[ActiveClip] = []
         self._mic_buffer = np.empty((0, 2), dtype="float32") if np else None
         self._lock = threading.Lock()
@@ -136,7 +136,7 @@ class AudioEngine:
     def _output_callback(self, outdata, frames, time_info, status):
         mixed = np.zeros((frames, 2), dtype="float32")
         with self._lock:
-            if self.microphone_level > 0 and len(self._mic_buffer):
+            if self.microphone_level > 0 and self.input_device is not None and len(self._mic_buffer):
                 mic = self._mic_buffer[:frames]
                 self._mic_buffer = self._mic_buffer[len(mic):]
                 mixed[:len(mic)] += mic * self.microphone_level
@@ -201,7 +201,7 @@ class Soundboard(tk.Tk):
         self.output_var = tk.StringVar()
         self.input_var = tk.StringVar()
         self.output_level = tk.DoubleVar(value=85)
-        self.microphone_level = tk.DoubleVar(value=0)
+        self.microphone_level = tk.DoubleVar(value=100)
         self.status_var = tk.StringVar(value="Choose audio devices, then click Apply audio settings.")
         self._build_ui()
         self._load_settings()
@@ -345,7 +345,7 @@ class Soundboard(tk.Tk):
             self.output_var.set(settings.get("output", ""))
             self.input_var.set(settings.get("input", ""))
             self.output_level.set(settings.get("output_level", 85))
-            self.microphone_level.set(settings.get("microphone_level", 0))
+            self.microphone_level.set(settings.get("microphone_level", 100))
         except (OSError, json.JSONDecodeError):
             self.status_var.set("Saved configuration could not be read")
 
