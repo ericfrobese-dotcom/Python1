@@ -52,6 +52,7 @@ class AudioEngine:
         self.output_level = 0.85
         self.microphone_level = 1.0
         self._clips: list[ActiveClip] = []
+        self._sounds_stopped = False
         self._mic_buffer = np.empty((0, 2), dtype="float32") if np else None
         self._lock = threading.Lock()
         self._output_stream = None
@@ -119,10 +120,12 @@ class AudioEngine:
                 for channel in range(2)
             ]).astype("float32")
         with self._lock:
+            self._sounds_stopped = False
             self._clips.append(ActiveClip(samples))
 
     def stop_sounds(self):
         with self._lock:
+            self._sounds_stopped = True
             self._clips.clear()
 
     def _input_callback(self, indata, frames, time_info, status):
@@ -141,7 +144,7 @@ class AudioEngine:
                 self._mic_buffer = self._mic_buffer[len(mic):]
                 mixed[:len(mic)] += mic * self.microphone_level
             remaining = []
-            for clip in self._clips:
+            for clip in [] if self._sounds_stopped else self._clips:
                 end = min(clip.position + frames, len(clip.samples))
                 clip_frames = end - clip.position
                 mixed[:clip_frames] += clip.samples[clip.position:end]
@@ -197,6 +200,8 @@ class Soundboard(tk.Tk):
             slot: tk.StringVar(value=label)
             for slot, label in zip(SLOTS, DEFAULT_LABELS)
         }
+        self.label_entries: dict[str, ttk.Entry] = {}
+        self.edit_label_buttons: dict[str, ttk.Button] = {}
         self.file_labels: dict[str, ttk.Label] = {}
         self.output_var = tk.StringVar()
         self.input_var = tk.StringVar()
@@ -247,7 +252,13 @@ class Soundboard(tk.Tk):
             cell.grid(row=row, column=column, sticky="nsew")
             board.columnconfigure(column, weight=1)
             ttk.Button(cell, textvariable=self.label_vars[slot], command=lambda name=slot: self._play_slot(name), width=20).grid(row=0, column=0, sticky="ew")
-            ttk.Entry(cell, textvariable=self.label_vars[slot], justify="center").grid(row=1, column=0, sticky="ew", pady=(4, 0))
+            edit_button = ttk.Button(cell, text="Edit Label", command=lambda name=slot: self._toggle_label_edit(name))
+            edit_button.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+            self.edit_label_buttons[slot] = edit_button
+            entry = ttk.Entry(cell, textvariable=self.label_vars[slot], justify="center")
+            entry.bind("<Return>", lambda event, name=slot: self._commit_label_edit(name))
+            entry.bind("<Tab>", lambda event, name=slot: self._commit_label_edit(name))
+            self.label_entries[slot] = entry
             ttk.Button(cell, text="Choose clip…", command=lambda name=slot: self._choose_clip(name)).grid(row=2, column=0, sticky="ew", pady=(4, 0))
             label = ttk.Label(cell, text="No clip selected", foreground="#666666", wraplength=215)
             label.grid(row=3, column=0, sticky="ew", pady=(3, 0))
@@ -258,6 +269,22 @@ class Soundboard(tk.Tk):
         ttk.Button(footer, text="Stop all sounds", command=self.engine.stop_sounds).pack(side="left")
         ttk.Button(footer, text="Save configuration", command=self._save_settings).pack(side="left", padx=8)
         ttk.Label(footer, textvariable=self.status_var).pack(side="right")
+
+    def _toggle_label_edit(self, slot: str):
+        entry = self.label_entries[slot]
+        button = self.edit_label_buttons[slot]
+        if entry.winfo_ismapped():
+            entry.grid_remove()
+            button.config(text="Edit Label")
+        else:
+            entry.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+            button.config(text="Done")
+            entry.focus_set()
+
+    def _commit_label_edit(self, slot: str):
+        if self.label_entries[slot].winfo_manager():
+            self._toggle_label_edit(slot)
+        return "break"
 
     def _refresh_devices(self):
         if not self.engine.available:
