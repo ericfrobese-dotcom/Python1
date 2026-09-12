@@ -116,9 +116,18 @@ class win(Frame):
         # Row 3 Blank
         # Row 4 <<Status line>>
         self.status = StringVar()
-        self.status_label = Label(self,bg='black',fg='white', textvariable = self.status)
+        self.status_label = Label(
+            self,
+            bg='black',
+            fg='white',
+            textvariable=self.status,
+            width=110,
+            anchor=W,
+            justify=LEFT,
+            wraplength=900,
+        )
         self.status.set(' -- General Status Info --')
-        self.status_label.grid(row = 4, padx = 4)
+        self.status_label.grid(row=4, padx=4, sticky=W, columnspan=3)
         # Row 5 - Source File List 
         self.sfButton = Button(self, text = 'Add Source File', command = self.chooseFile)
         self.sfButton.grid(row = 5, column = 1, sticky = W)
@@ -141,9 +150,12 @@ class win(Frame):
         self.spButton.grid(row = 8)
 
     def gStat(self, msg, f = 'white', b = 'black'):
-        self.status.set(msg)
+        display_msg = str(msg)
+        if len(display_msg) > 160:
+            display_msg = display_msg[:157] + '...'
+        self.status.set(display_msg)
         self.status_label.config(bg = b, fg = f)
-        self.status_label.grid(row = 4, padx = 4)
+        self.status_label.grid(row = 4, padx = 4, sticky=W, columnspan=3)
 
     def _show_propagation_errors(self, errors):
         """Display every error from one propagation run in a single popup."""
