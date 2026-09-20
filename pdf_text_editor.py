@@ -4,6 +4,7 @@
 #
 from __future__ import annotations
 
+import json
 import os
 import tkinter as tk
 from html import escape
@@ -13,6 +14,54 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 import pymupdf as fitz
+
+
+def _valid_directory(path, fallback=None):
+    """Return an existing directory, falling back to the current directory."""
+    candidate = Path(path).expanduser() if path else None
+    if candidate is not None and candidate.is_dir():
+        return candidate
+    if fallback is not None:
+        fallback = Path(fallback).expanduser()
+        if fallback.is_dir():
+            return fallback
+    return Path.cwd()
+
+
+def _preferences_path():
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return config_home / "pdf_text_editor" / "directories.json"
+
+
+def load_directory_preferences():
+    """Load remembered dialog directories, ignoring stale or malformed settings."""
+    default = _valid_directory(None)
+    try:
+        with _preferences_path().open(encoding="utf-8") as settings_file:
+            preferences = json.load(settings_file)
+    except (OSError, ValueError, TypeError):
+        preferences = {}
+    return (
+        _valid_directory(preferences.get("load_directory"), default),
+        _valid_directory(preferences.get("save_directory"), default),
+    )
+
+
+def save_directory_preferences(load_directory, save_directory):
+    """Persist only existing directories; a failure must not block PDF editing."""
+    try:
+        settings_path = _preferences_path()
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        with settings_path.open("w", encoding="utf-8") as settings_file:
+            json.dump(
+                {
+                    "load_directory": str(_valid_directory(load_directory)),
+                    "save_directory": str(_valid_directory(save_directory)),
+                },
+                settings_file,
+            )
+    except OSError:
+        pass
 
 
 def normalize_insert_text(text):
@@ -331,6 +380,7 @@ class PDFTextEditorApp:
         self.inline_changed = False
         self.attribute_controls = []
         self.attribute_drag_offset = None
+        self.last_load_directory, self.last_save_directory = load_directory_preferences()
 
         self._build_ui()
 
@@ -409,7 +459,9 @@ class PDFTextEditorApp:
         self.color_button.pack(side="left", padx=(4, 0))
         self.attribute_controls = [self.font_selector, self.size_entry, self.bold_button, self.italic_button, self.color_button]
         self.font_selector.bind("<<ComboboxSelected>>", self._apply_style_to_selection)
+        self.size_entry.configure(command=self._apply_style_to_selection)
         self.size_entry.bind("<Return>", self._apply_style_to_selection)
+        self.size_entry.bind("<FocusOut>", self._apply_style_to_selection)
         self._reset_attribute_bar()
         self._set_attribute_bar_enabled(False)
 
@@ -427,6 +479,9 @@ class PDFTextEditorApp:
         y = event.y_root - self.root.winfo_rooty() - offset_y
         x = max(0, min(x, max(0, self.root.winfo_width() - self.attribute_bar.winfo_width())))
         y = max(0, min(y, max(0, self.root.winfo_height() - self.attribute_bar.winfo_height())))
+        # Clear the reset position's relative coordinates.  Otherwise a drag
+        # offsets from the bottom-centre and can hide the bar off-screen.
+        self.attribute_bar.place(relx=0, rely=0)
         self.attribute_bar.place(x=x, y=y, anchor="nw")
         self.attribute_bar.lift()
 
@@ -446,9 +501,15 @@ class PDFTextEditorApp:
             control.configure(state=state)
 
     def open_pdf(self):
-        pdf_path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
+        pdf_path = filedialog.askopenfilename(
+            filetypes=[("PDF files", "*.pdf")],
+            initialdir=str(_valid_directory(self.last_load_directory)),
+        )
         if not pdf_path:
             return
+
+        self.last_load_directory = _valid_directory(Path(pdf_path).parent, self.last_load_directory)
+        save_directory_preferences(self.last_load_directory, self.last_save_directory)
 
         self.commit_inline_edit()
         if self.doc is not None:
@@ -574,6 +635,10 @@ class PDFTextEditorApp:
         )
         width = max(90, (block["x1"] - block["x0"]) * self.preview_scale_x + 8)
         height = max(30, (block["y1"] - block["y0"]) * self.preview_scale_y + 8)
+        # A Text widget's untagged characters use its base style.  Set it
+        # before creating the widget so the first keystroke in a newly opened
+        # section never flashes the attributes from the last section.
+        self._set_attribute_bar_style(style)
 
         self.inline_editor_frame = tk.Frame(
             self.canvas, bg="#f5f8ff", highlightthickness=1, highlightbackground="#2b78e4"
@@ -583,10 +648,13 @@ class PDFTextEditorApp:
             self.inline_editor_frame,
             wrap="word",
             undo=True,
+            # Keep ``sel`` while an attribute control receives focus.
+            exportselection=False,
             relief="solid",
             borderwidth=1,
             highlightthickness=0,
-            foreground=self.text_color,
+            font=self._tk_font_tuple(style),
+            foreground=rgb_to_hex(style["color"]),
         )
         self.inline_editor.pack(fill="both", expand=True)
         self.inline_editor.insert("1.0", displayed_text)
@@ -610,7 +678,6 @@ class PDFTextEditorApp:
             offset += len(run_text)
         if offset != len(displayed_text):
             self._apply_style_tag("1.0", "end-1c", style)
-        self._set_attribute_bar_style(style)
         self._set_attribute_bar_enabled(True)
         self.inline_editor_window = self.canvas.create_window(
             block["x0"] * self.preview_scale_x,
@@ -631,6 +698,23 @@ class PDFTextEditorApp:
         if font_name.startswith("co"):
             return "Courier"
         return "Helvetica"
+
+    def _tk_font_tuple(self, style):
+        """Return a Tk font matching a PDF style at the current preview scale."""
+        if style["font"].startswith("ti"):
+            family = "Times"
+        elif style["font"].startswith("co"):
+            family = "Courier"
+        else:
+            family = "Helvetica"
+        weight = "bold" if style["flags"] & fitz.TEXT_FONT_BOLD else "normal"
+        slant = "italic" if style["flags"] & fitz.TEXT_FONT_ITALIC else "roman"
+        return (
+            family,
+            -max(1, round(style["size"] * self.preview_scale_y)),
+            weight,
+            slant,
+        )
 
     def _selected_pdf_font(self):
         family = self.font_family_var.get()
@@ -675,18 +759,11 @@ class PDFTextEditorApp:
 
     def _apply_style_tag(self, start, end, style):
         tag = self._style_tag_name(style)
-        if style["font"].startswith("ti"):
-            family = "Times"
-        elif style["font"].startswith("co"):
-            family = "Courier"
-        else:
-            family = "Helvetica"
-        weight = "bold" if style["flags"] & fitz.TEXT_FONT_BOLD else "normal"
-        slant = "italic" if style["flags"] & fitz.TEXT_FONT_ITALIC else "roman"
-        # Tk treats a positive font size as points, which applies display DPI a
-        # second time.  A negative size is pixels, matching the PDF pixmap.
-        preview_size = -max(1, round(style["size"] * self.preview_scale_y))
-        self.inline_editor.tag_configure(tag, font=(family, preview_size, weight, slant), foreground=rgb_to_hex(style["color"]))
+        self.inline_editor.tag_configure(
+            tag,
+            font=self._tk_font_tuple(style),
+            foreground=rgb_to_hex(style["color"]),
+        )
         self.inline_editor.tag_add(tag, start, end)
         self.inline_editor.tag_raise(tag)
 
@@ -745,14 +822,15 @@ class PDFTextEditorApp:
         return None
 
     def _inherit_style_for_typed_character(self):
-        """Style a new character only when its printable neighbours agree."""
+        """Give new text the previous printable style, or the next at block start."""
         if self.inline_editor is None:
             return
         inserted_start = self.inline_editor.index("insert -1c")
         previous = self._nearest_printable_style(f"{inserted_start} -1c", "-")
         following = self._nearest_printable_style("insert", "+")
-        if previous is not None and previous == following:
-            self._apply_style_tag(inserted_start, "insert", previous)
+        inherited_style = previous if previous is not None else following
+        if inherited_style is not None:
+            self._apply_style_tag(inserted_start, "insert", inherited_style)
 
     def _mark_inline_text_changed(self, _event=None):
         if self.inline_editor.edit_modified():
@@ -922,11 +1000,14 @@ class PDFTextEditorApp:
             defaultextension=".pdf",
             title="Save edited PDF",
             filetypes=[("PDF files", "*.pdf")],
+            initialdir=str(_valid_directory(self.last_save_directory, self.last_load_directory)),
         )
         if not output_path:
             return
 
         output_path = str(Path(output_path).with_suffix(".pdf"))
+        self.last_save_directory = _valid_directory(Path(output_path).parent, self.last_save_directory)
+        save_directory_preferences(self.last_load_directory, self.last_save_directory)
 
         try:
             save_pdf_with_edits(self.doc.name, self.pending_edits, output_path=output_path)
