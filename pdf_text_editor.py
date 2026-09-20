@@ -388,6 +388,7 @@ class PDFTextEditorApp:
         grip.bind("<ButtonPress-1>", self._start_attribute_bar_drag)
         grip.bind("<B1-Motion>", self._drag_attribute_bar)
         grip.bind("<ButtonRelease-1>", self._finish_attribute_bar_drag)
+        self.root.bind("<Configure>", lambda _event: self.attribute_bar.lift(), add="+")
 
         self.font_family_var = tk.StringVar(value="Helvetica")
         self.font_size_var = tk.StringVar(value="11")
@@ -414,6 +415,8 @@ class PDFTextEditorApp:
 
     def _start_attribute_bar_drag(self, event):
         self.attribute_drag_offset = (event.x_root - self.attribute_bar.winfo_rootx(), event.y_root - self.attribute_bar.winfo_rooty())
+        self.attribute_bar.lift()
+        event.widget.grab_set()
 
     def _drag_attribute_bar(self, event):
         if self.attribute_drag_offset is None:
@@ -425,13 +428,17 @@ class PDFTextEditorApp:
         x = max(0, min(x, max(0, self.root.winfo_width() - self.attribute_bar.winfo_width())))
         y = max(0, min(y, max(0, self.root.winfo_height() - self.attribute_bar.winfo_height())))
         self.attribute_bar.place(x=x, y=y, anchor="nw")
+        self.attribute_bar.lift()
 
-    def _finish_attribute_bar_drag(self, _event=None):
+    def _finish_attribute_bar_drag(self, event=None):
         self.attribute_drag_offset = None
+        if event is not None:
+            event.widget.grab_release()
 
     def _reset_attribute_bar(self):
         """Return the floating bar to its visible default position."""
         self.attribute_bar.place(relx=0.5, rely=1.0, x=0, y=-8, anchor="s")
+        self.attribute_bar.lift()
 
     def _set_attribute_bar_enabled(self, enabled):
         state = "normal" if enabled else "disabled"
@@ -676,7 +683,9 @@ class PDFTextEditorApp:
             family = "Helvetica"
         weight = "bold" if style["flags"] & fitz.TEXT_FONT_BOLD else "normal"
         slant = "italic" if style["flags"] & fitz.TEXT_FONT_ITALIC else "roman"
-        preview_size = max(8, round(style["size"] * self.preview_scale_y))
+        # Tk treats a positive font size as points, which applies display DPI a
+        # second time.  A negative size is pixels, matching the PDF pixmap.
+        preview_size = -max(1, round(style["size"] * self.preview_scale_y))
         self.inline_editor.tag_configure(tag, font=(family, preview_size, weight, slant), foreground=rgb_to_hex(style["color"]))
         self.inline_editor.tag_add(tag, start, end)
         self.inline_editor.tag_raise(tag)
@@ -849,7 +858,7 @@ class PDFTextEditorApp:
                 self._draw_canvas_runs(x0, y0, replacement["runs"], style)
                 continue
             replacement, style = edit_value_and_style(replacement, style)
-            font_size = max(8, round(style["size"] * self.preview_scale_y))
+            font_size = -max(1, round(style["size"] * self.preview_scale_y))
             if style["font"].startswith("ti"):
                 family = "Times"
             elif style["font"].startswith("co"):
@@ -883,7 +892,12 @@ class PDFTextEditorApp:
                 family = "Helvetica"
             weight = "bold" if style["flags"] & fitz.TEXT_FONT_BOLD else "normal"
             slant = "italic" if style["flags"] & fitz.TEXT_FONT_ITALIC else "roman"
-            font = tkfont.Font(family=family, size=max(8, round(style["size"] * self.preview_scale_y)), weight=weight, slant=slant)
+            font = tkfont.Font(
+                family=family,
+                size=-max(1, round(style["size"] * self.preview_scale_y)),
+                weight=weight,
+                slant=slant,
+            )
             line_height = max(line_height, font.metrics("linespace"))
             for part in str(run.get("text", "")).splitlines(keepends=True):
                 visible_text = part.rstrip("\n")

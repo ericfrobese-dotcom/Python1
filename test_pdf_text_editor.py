@@ -42,6 +42,8 @@ class _FakeAttributeBar:
         self.width = width
         self.height = height
         self.place_calls = []
+        self.lift_count = 0
+        self.grabbed = False
 
     def winfo_rootx(self):
         return self.root_x
@@ -58,6 +60,15 @@ class _FakeAttributeBar:
     def place(self, **kwargs):
         self.place_calls.append(kwargs)
 
+    def lift(self):
+        self.lift_count += 1
+
+    def grab_set(self):
+        self.grabbed = True
+
+    def grab_release(self):
+        self.grabbed = False
+
 
 def test_attribute_bar_drag_stays_visible_and_can_be_reset():
     """The draggable bar must clamp to the window and have a reliable recovery position."""
@@ -67,8 +78,10 @@ def test_attribute_bar_drag_stays_visible_and_can_be_reset():
         attribute_drag_offset=None,
     )
 
-    PDFTextEditorApp._start_attribute_bar_drag(app, SimpleNamespace(x_root=270, y_root=130))
+    event = SimpleNamespace(x_root=270, y_root=130, widget=app.attribute_bar)
+    PDFTextEditorApp._start_attribute_bar_drag(app, event)
     assert app.attribute_drag_offset == (20, 30)
+    assert app.attribute_bar.grabbed is True
 
     # A pointer position far outside the bottom-right must be constrained to
     # the last fully visible position: 500 - 200 by 400 - 50.
@@ -76,8 +89,9 @@ def test_attribute_bar_drag_stays_visible_and_can_be_reset():
     assert app.root.updated is True
     assert app.attribute_bar.place_calls[-1] == {"x": 300, "y": 350, "anchor": "nw"}
 
-    PDFTextEditorApp._finish_attribute_bar_drag(app)
+    PDFTextEditorApp._finish_attribute_bar_drag(app, event)
     assert app.attribute_drag_offset is None
+    assert app.attribute_bar.grabbed is False
 
     PDFTextEditorApp._reset_attribute_bar(app)
     assert app.attribute_bar.place_calls[-1] == {
@@ -87,6 +101,7 @@ def test_attribute_bar_drag_stays_visible_and_can_be_reset():
         "y": -8,
         "anchor": "s",
     }
+    assert app.attribute_bar.lift_count >= 3
 
 
 def test_normalize_font_name_handles_unknown_fonts():
