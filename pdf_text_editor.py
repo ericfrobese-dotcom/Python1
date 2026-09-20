@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import os
 import tkinter as tk
+from html import escape
+from tkinter import font as tkfont
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 import pymupdf as fitz
@@ -46,8 +48,10 @@ def normalize_font_name(font_name, flags=0):
             return "hebi"
         if flags & fitz.TEXT_FONT_BOLD:
             return "hebo"
+        if flags & fitz.TEXT_FONT_ITALIC:
+            return "heit"
         if any(token in lowered for token in ("boldoblique", "oblique", "italic")):
-            return "hebi"
+            return "hebi" if "bold" in lowered else "heit"
         return "helv"
 
     if any(token in lowered for token in ("times", "tiro")):
@@ -55,8 +59,10 @@ def normalize_font_name(font_name, flags=0):
             return "tibi"
         if flags & fitz.TEXT_FONT_BOLD:
             return "tibo"
+        if flags & fitz.TEXT_FONT_ITALIC:
+            return "tiit"
         if any(token in lowered for token in ("bolditalic", "italic", "oblique")):
-            return "tibi"
+            return "tibi" if "bold" in lowered else "tiit"
         return "tiro"
 
     if any(token in lowered for token in ("courier", "cour")):
@@ -64,8 +70,10 @@ def normalize_font_name(font_name, flags=0):
             return "cobi"
         if flags & fitz.TEXT_FONT_BOLD:
             return "cobo"
+        if flags & fitz.TEXT_FONT_ITALIC:
+            return "coit"
         if any(token in lowered for token in ("bolditalic", "italic", "oblique")):
-            return "cobi"
+            return "cobi" if "bold" in lowered else "coit"
         return "cour"
 
     if any(token in lowered for token in ("symbol", "zapf")):
@@ -77,15 +85,62 @@ def normalize_font_name(font_name, flags=0):
     return "helv"
 
 
+def color_int_to_rgb(color):
+    """Convert PyMuPDF's packed span colour to an RGB tuple."""
+    color = int(color or 0)
+    return ((color >> 16 & 255) / 255, (color >> 8 & 255) / 255, (color & 255) / 255)
+
+
+def rgb_to_hex(color):
+    red, green, blue = color
+    return f"#{round(red * 255):02x}{round(green * 255):02x}{round(blue * 255):02x}"
+
+
+def edit_value_and_style(value, original_style):
+    """Accept legacy string edits as well as styled editor edit dictionaries."""
+    if isinstance(value, dict):
+        style = dict(original_style)
+        style.update({key: value[key] for key in ("font", "size", "flags", "color") if key in value})
+        return str(value.get("text", "")), style
+    return str(value), dict(original_style)
+
+
+def style_to_css(style):
+    family = {"helv": "Helvetica", "tiro": "Times New Roman", "cour": "Courier New"}
+    font = style["font"]
+    if font.startswith("ti"):
+        font_family = family["tiro"]
+    elif font.startswith("co"):
+        font_family = family["cour"]
+    else:
+        font_family = family["helv"]
+    return (
+        f"font-family: {font_family}; font-size: {float(style['size']):g}pt; "
+        f"font-weight: {'bold' if style['flags'] & fitz.TEXT_FONT_BOLD else 'normal'}; "
+        f"font-style: {'italic' if style['flags'] & fitz.TEXT_FONT_ITALIC else 'normal'}; "
+        f"color: {rgb_to_hex(style['color'])};"
+    )
+
+
+def styled_runs_to_html(runs, fallback_style):
+    fragments = []
+    for run in runs:
+        style = dict(fallback_style)
+        style.update(run.get("style", {}))
+        text = escape(str(run.get("text", ""))).replace("\n", "<br>")
+        fragments.append(f'<span style="{style_to_css(style)}">{text}</span>')
+    return "<div>" + "".join(fragments) + "</div>"
+
+
 def get_block_style(page, block_index):
     text_dict = page.get_text("dict")
     blocks = text_dict.get("blocks", [])
     if block_index >= len(blocks):
-        return {"font": "helv", "size": 11, "flags": 0}
+        return {"font": "helv", "size": 11, "flags": 0, "color": (0, 0, 0)}
 
     block = blocks[block_index]
     if block.get("type") != 0:
-        return {"font": "helv", "size": 11, "flags": 0}
+        return {"font": "helv", "size": 11, "flags": 0, "color": (0, 0, 0)}
 
     for line in block.get("lines", []):
         for span in line.get("spans", []):
@@ -95,9 +150,10 @@ def get_block_style(page, block_index):
                 "font": font,
                 "size": float(span.get("size", 11)),
                 "flags": flags,
+                "color": color_int_to_rgb(span.get("color", 0)),
             }
 
-    return {"font": "helv", "size": 11, "flags": 0}
+    return {"font": "helv", "size": 11, "flags": 0, "color": (0, 0, 0)}
 
 
 def apply_pdf_text_edits(pdf_path, edits_by_page):
@@ -130,21 +186,53 @@ def apply_pdf_text_edits(pdf_path, edits_by_page):
             continue
 
         blocks = source_page.get_text("blocks")
-        for block_index, new_text in page_edits.items():
+        for block_index, edit in page_edits.items():
             if block_index >= len(blocks):
                 continue
 
             x0, y0, x1, y1 = blocks[block_index][:4]
-            style = get_block_style(source_page, block_index)
+            original_style = get_block_style(source_page, block_index)
+            new_text, style = edit_value_and_style(edit, original_style)
             rect = fitz.Rect(float(x0) - 2, float(y0) - 2, float(x1) + 2, float(y1) + 2)
             target_page.draw_rect(rect, fill=(1, 1, 1), color=(1, 1, 1), overlay=True)
-            target_page.insert_text(
-                (float(x0), float(y0)),
+            if isinstance(edit, dict) and edit.get("runs") is not None:
+                spare_height, scale = target_page.insert_htmlbox(
+                    rect,
+                    styled_runs_to_html(edit["runs"], style),
+                    css="body { margin: 0; padding: 0; line-height: 1.15; }",
+                    scale_low=0,
+                )
+                if spare_height < 0 or scale == 0:
+                    raise ValueError(
+                        f"The edited text in page {page_index + 1}, block {block_index + 1} does not fit its original area."
+                    )
+                continue
+            font_size = float(style["size"])
+            result = target_page.insert_textbox(
+                rect,
                 normalize_insert_text(new_text),
-                fontsize=float(style["size"]),
+                fontsize=font_size,
                 fontname=style["font"],
-                color=(0, 0, 0),
+                color=tuple(style["color"]),
+                align=fitz.TEXT_ALIGN_LEFT,
             )
+            # A replacement must remain in its original block.  If it is too
+            # long, reduce its size only as much as needed rather than writing
+            # over the next section of the page.
+            while result < 0 and font_size > 4:
+                font_size -= 0.5
+                result = target_page.insert_textbox(
+                    rect,
+                    normalize_insert_text(new_text),
+                    fontsize=font_size,
+                    fontname=style["font"],
+                    color=tuple(style["color"]),
+                    align=fitz.TEXT_ALIGN_LEFT,
+                )
+            if result < 0:
+                raise ValueError(
+                    f"The edited text in page {page_index + 1}, block {block_index + 1} does not fit its original area."
+                )
 
     source_doc.close()
     return edited_doc
@@ -228,6 +316,21 @@ class PDFTextEditorApp:
         self.page_blocks = []
         self.pending_edits = {}
         self.page_image = None
+        self.preview_scale_x = 1.0
+        self.preview_scale_y = 1.0
+        self.inline_editor = None
+        self.inline_editor_window = None
+        self.inline_editor_frame = None
+        self.font_family_var = None
+        self.font_size_var = None
+        self.bold_var = None
+        self.italic_var = None
+        self.text_color = "#000000"
+        self.style_tags = {}
+        self.next_style_tag = 0
+        self.inline_changed = False
+        self.attribute_controls = []
+        self.attribute_drag_offset = None
 
         self._build_ui()
 
@@ -236,45 +339,113 @@ class PDFTextEditorApp:
         toolbar.pack(fill="x")
 
         ttk.Button(toolbar, text="Open PDF", command=self.open_pdf).pack(side="left")
-        ttk.Button(toolbar, text="Apply Edit", command=self.apply_current_edit).pack(side="left", padx=(8, 0))
         ttk.Button(toolbar, text="Save Edited PDF", command=self.save_edited_pdf).pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="Reset attributes bar", command=self._reset_attribute_bar).pack(side="left", padx=(8, 0))
 
-        self.status_var = tk.StringVar(value="Open a PDF to begin.")
+        self.status_var = tk.StringVar(value="Open a PDF, then click text on the page to edit it in place.")
         ttk.Label(toolbar, textvariable=self.status_var).pack(side="left", padx=(18, 0))
 
-        main = ttk.PanedWindow(self.root, orient="horizontal")
-        main.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        document = ttk.Frame(self.root, padding=(10, 0, 10, 10))
+        document.pack(fill="both", expand=True)
 
-        left = ttk.Frame(main, padding=6)
-        main.add(left, weight=1)
-
-        page_controls = ttk.Frame(left)
+        page_controls = ttk.Frame(document)
         page_controls.pack(fill="x")
         ttk.Label(page_controls, text="Page:").pack(side="left")
         self.page_selector = ttk.Combobox(page_controls, state="readonly", width=12)
         self.page_selector.pack(side="left", padx=(6, 0))
         self.page_selector.bind("<<ComboboxSelected>>", self.on_page_selected)
+        ttk.Label(
+            page_controls,
+            text="Click a text area to edit it. Click elsewhere or press Ctrl+Enter to keep the change.",
+        ).pack(side="left", padx=(16, 0))
 
-        self.canvas = tk.Canvas(left, width=500, height=680, bg="#e6e6e6", highlightthickness=1, highlightbackground="#7a7a7a")
-        self.canvas.pack(fill="both", expand=True, pady=(8, 0))
+        preview = ttk.Frame(document)
+        preview.pack(fill="both", expand=True, pady=(8, 0))
+        preview.rowconfigure(0, weight=1)
+        preview.columnconfigure(0, weight=1)
+        self.canvas = tk.Canvas(
+            preview,
+            width=900,
+            height=680,
+            bg="#e6e6e6",
+            highlightthickness=1,
+            highlightbackground="#7a7a7a",
+        )
+        vertical_scroll = ttk.Scrollbar(preview, orient="vertical", command=self.canvas.yview)
+        horizontal_scroll = ttk.Scrollbar(preview, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(xscrollcommand=horizontal_scroll.set, yscrollcommand=vertical_scroll.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        vertical_scroll.grid(row=0, column=1, sticky="ns")
+        horizontal_scroll.grid(row=1, column=0, sticky="ew")
+        self.canvas.bind("<Button-1>", self.on_canvas_clicked)
+        self._build_attribute_bar()
 
-        right = ttk.Frame(main, padding=6)
-        main.add(right, weight=1)
+    def _build_attribute_bar(self):
+        """Create a floating, draggable bar for styling selected editor text."""
+        self.attribute_bar = ttk.Frame(self.root, padding=4, relief="raised", borderwidth=1)
+        grip = ttk.Label(self.attribute_bar, text="Text attributes  ⠿", cursor="fleur")
+        grip.pack(side="left", padx=(0, 6))
+        grip.bind("<ButtonPress-1>", self._start_attribute_bar_drag)
+        grip.bind("<B1-Motion>", self._drag_attribute_bar)
+        grip.bind("<ButtonRelease-1>", self._finish_attribute_bar_drag)
 
-        ttk.Label(right, text="Text blocks on this page").pack(anchor="w")
-        self.block_listbox = tk.Listbox(right, exportselection=False)
-        self.block_listbox.pack(fill="both", expand=True)
-        self.block_listbox.bind("<<ListboxSelect>>", self.on_block_selected)
+        self.font_family_var = tk.StringVar(value="Helvetica")
+        self.font_size_var = tk.StringVar(value="11")
+        self.bold_var = tk.BooleanVar(value=False)
+        self.italic_var = tk.BooleanVar(value=False)
+        self.font_selector = ttk.Combobox(self.attribute_bar, textvariable=self.font_family_var,
+                                          values=("Helvetica", "Times", "Courier"), state="readonly", width=10)
+        self.font_selector.pack(side="left")
+        self.size_entry = ttk.Spinbox(self.attribute_bar, from_=4, to=144, textvariable=self.font_size_var, width=4)
+        self.size_entry.pack(side="left", padx=(4, 0))
+        self.bold_button = ttk.Checkbutton(self.attribute_bar, text="B", variable=self.bold_var,
+                                           command=self._apply_style_to_selection)
+        self.bold_button.pack(side="left", padx=(5, 0))
+        self.italic_button = ttk.Checkbutton(self.attribute_bar, text="I", variable=self.italic_var,
+                                             command=self._apply_style_to_selection)
+        self.italic_button.pack(side="left")
+        self.color_button = tk.Button(self.attribute_bar, text="Color", command=self._choose_text_color, width=6)
+        self.color_button.pack(side="left", padx=(4, 0))
+        self.attribute_controls = [self.font_selector, self.size_entry, self.bold_button, self.italic_button, self.color_button]
+        self.font_selector.bind("<<ComboboxSelected>>", self._apply_style_to_selection)
+        self.size_entry.bind("<Return>", self._apply_style_to_selection)
+        self._reset_attribute_bar()
+        self._set_attribute_bar_enabled(False)
 
-        ttk.Label(right, text="Edit selected text").pack(anchor="w", pady=(12, 4))
-        self.edit_text = tk.Text(right, height=12, wrap="word")
-        self.edit_text.pack(fill="both", expand=True)
+    def _start_attribute_bar_drag(self, event):
+        self.attribute_drag_offset = (event.x_root - self.attribute_bar.winfo_rootx(), event.y_root - self.attribute_bar.winfo_rooty())
+
+    def _drag_attribute_bar(self, event):
+        if self.attribute_drag_offset is None:
+            return
+        offset_x, offset_y = self.attribute_drag_offset
+        self.root.update_idletasks()
+        x = event.x_root - self.root.winfo_rootx() - offset_x
+        y = event.y_root - self.root.winfo_rooty() - offset_y
+        x = max(0, min(x, max(0, self.root.winfo_width() - self.attribute_bar.winfo_width())))
+        y = max(0, min(y, max(0, self.root.winfo_height() - self.attribute_bar.winfo_height())))
+        self.attribute_bar.place(x=x, y=y, anchor="nw")
+
+    def _finish_attribute_bar_drag(self, _event=None):
+        self.attribute_drag_offset = None
+
+    def _reset_attribute_bar(self):
+        """Return the floating bar to its visible default position."""
+        self.attribute_bar.place(relx=0.5, rely=1.0, x=0, y=-8, anchor="s")
+
+    def _set_attribute_bar_enabled(self, enabled):
+        state = "normal" if enabled else "disabled"
+        for control in self.attribute_controls:
+            control.configure(state=state)
 
     def open_pdf(self):
         pdf_path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
         if not pdf_path:
             return
 
+        self.commit_inline_edit()
+        if self.doc is not None:
+            self.doc.close()
         self.doc = fitz.open(pdf_path)
         self.page_selector.config(values=[f"Page {i+1}" for i in range(len(self.doc))])
         self.page_selector.current(0)
@@ -295,26 +466,21 @@ class PDFTextEditorApp:
         if not self.doc:
             return
 
+        self.commit_inline_edit()
         self.current_page_index = page_index
         page = self.doc[page_index]
         self.page_blocks = self._collect_blocks(page)
-        self.selected_block_index = 0 if self.page_blocks else None
-
-        self.block_listbox.delete(0, tk.END)
-        for block in self.page_blocks:
-            preview = block["text"][:60]
-            self.block_listbox.insert(tk.END, f"{block['page']}.{block['block_index'] + 1}: {preview}")
+        self.selected_block_index = None
 
         self._render_page_preview(page)
         if self.page_blocks:
-            self._populate_editor_from_selection(0)
+            self.status_var.set(f"Page {page_index + 1}: click a text area to edit it in place.")
         else:
-            self.edit_text.delete("1.0", tk.END)
-            self.edit_text.insert("1.0", "This page has no selectable text.")
             self.status_var.set(f"Page {page_index + 1} has no text blocks.")
 
     def _collect_blocks(self, page):
         blocks = []
+        text_dict_blocks = page.get_text("dict").get("blocks", [])
         for block_index, block in enumerate(page.get_text("blocks")):
             if len(block) < 6:
                 continue
@@ -322,6 +488,31 @@ class PDFTextEditorApp:
             clean_text = str(text).strip()
             if not clean_text:
                 continue
+            runs = []
+            dict_block = text_dict_blocks[block_index] if block_index < len(text_dict_blocks) else {}
+            if dict_block.get("type") == 0:
+                lines = dict_block.get("lines", [])
+                for line_number, line in enumerate(lines):
+                    for span in line.get("spans", []):
+                        span_text = str(span.get("text", ""))
+                        if not span_text:
+                            continue
+                        flags = int(span.get("flags", 0))
+                        runs.append(
+                            {
+                                "text": span_text,
+                                "style": {
+                                    "font": normalize_font_name(span.get("font", "helv"), flags),
+                                    "size": float(span.get("size", 11)),
+                                    "flags": flags,
+                                    "color": color_int_to_rgb(span.get("color", 0)),
+                                },
+                            }
+                        )
+                    if line_number < len(lines) - 1:
+                        runs.append({"text": "\n", "style": runs[-1]["style"] if runs else get_block_style(page, block_index)})
+            if "".join(run["text"] for run in runs).strip() != clean_text:
+                runs = []
             blocks.append(
                 {
                     "page": self.current_page_index + 1,
@@ -331,28 +522,286 @@ class PDFTextEditorApp:
                     "y0": float(y0),
                     "x1": float(x1),
                     "y1": float(y1),
+                    "runs": runs,
                 }
             )
         return blocks
 
-    def on_block_selected(self, _event):
-        if self.block_listbox.curselection():
-            index = self.block_listbox.curselection()[0]
-            self._populate_editor_from_selection(index)
-
-    def _populate_editor_from_selection(self, index):
-        self.selected_block_index = index
-        if not self.page_blocks or index >= len(self.page_blocks):
-            self.edit_text.delete("1.0", tk.END)
+    def on_canvas_clicked(self, event):
+        """Open an editor over the text block clicked in the page preview."""
+        if not self.doc:
             return
 
+        clicked_index = self._block_at_canvas_position(self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+        if clicked_index is None:
+            self.commit_inline_edit()
+            self.selected_block_index = None
+            self._render_page_preview(self.doc[self.current_page_index])
+            return
+
+        if clicked_index == self.selected_block_index and self.inline_editor is not None:
+            self.inline_editor.focus_set()
+            return
+
+        self.commit_inline_edit()
+        self.selected_block_index = clicked_index
+        self._render_page_preview(self.doc[self.current_page_index])
+        self._show_inline_editor(clicked_index)
+
+    def _block_at_canvas_position(self, x, y):
+        for index, block in enumerate(self.page_blocks):
+            if (
+                block["x0"] * self.preview_scale_x <= x <= block["x1"] * self.preview_scale_x
+                and block["y0"] * self.preview_scale_y <= y <= block["y1"] * self.preview_scale_y
+            ):
+                return index
+        return None
+
+    def _show_inline_editor(self, index):
         block = self.page_blocks[index]
         current_page_edits = self.pending_edits.get(self.current_page_index, {})
-        displayed_text = current_page_edits.get(block["block_index"], block["text"])
+        original_style = get_block_style(self.doc[self.current_page_index], block["block_index"])
+        pending_edit = current_page_edits.get(block["block_index"], block["text"])
+        displayed_text, style = edit_value_and_style(
+            pending_edit, original_style
+        )
+        width = max(90, (block["x1"] - block["x0"]) * self.preview_scale_x + 8)
+        height = max(30, (block["y1"] - block["y0"]) * self.preview_scale_y + 8)
 
-        self.edit_text.delete("1.0", tk.END)
-        self.edit_text.insert("1.0", displayed_text)
+        self.inline_editor_frame = tk.Frame(
+            self.canvas, bg="#f5f8ff", highlightthickness=1, highlightbackground="#2b78e4"
+        )
+
+        self.inline_editor = tk.Text(
+            self.inline_editor_frame,
+            wrap="word",
+            undo=True,
+            relief="solid",
+            borderwidth=1,
+            highlightthickness=0,
+            foreground=self.text_color,
+        )
+        self.inline_editor.pack(fill="both", expand=True)
+        self.inline_editor.insert("1.0", displayed_text)
+        self.inline_editor.bind("<Control-Return>", self.commit_inline_edit)
+        self.inline_editor.bind("<<Modified>>", self._mark_inline_text_changed)
+        self.inline_editor.bind("<ButtonRelease-1>", self._sync_attribute_bar_to_selection)
+        self.inline_editor.bind("<KeyRelease>", self._on_editor_key_release)
+        self.style_tags = {}
+        self.next_style_tag = 0
+        self.inline_changed = False
+        if isinstance(pending_edit, dict) and pending_edit.get("runs"):
+            initial_runs = pending_edit["runs"]
+        else:
+            initial_runs = block["runs"] or [{"text": displayed_text, "style": style}]
+        offset = 0
+        for run in initial_runs:
+            run_text = str(run.get("text", ""))
+            if not run_text:
+                continue
+            self._apply_style_tag(f"1.0+{offset}c", f"1.0+{offset + len(run_text)}c", run.get("style", style))
+            offset += len(run_text)
+        if offset != len(displayed_text):
+            self._apply_style_tag("1.0", "end-1c", style)
+        self._set_attribute_bar_style(style)
+        self._set_attribute_bar_enabled(True)
+        self.inline_editor_window = self.canvas.create_window(
+            block["x0"] * self.preview_scale_x,
+            block["y0"] * self.preview_scale_y,
+            anchor="nw",
+            width=width,
+            height=height,
+            window=self.inline_editor_frame,
+        )
+        self.inline_editor.focus_set()
+        self.inline_editor.edit_modified(False)
+        self.status_var.set("Select text, then use the floating Text attributes bar. Click elsewhere or press Ctrl+Enter to keep the change.")
+
+    @staticmethod
+    def _font_family_label(font_name):
+        if font_name.startswith("ti"):
+            return "Times"
+        if font_name.startswith("co"):
+            return "Courier"
+        return "Helvetica"
+
+    def _selected_pdf_font(self):
+        family = self.font_family_var.get()
+        bold = self.bold_var.get()
+        italic = self.italic_var.get()
+        base = {"Helvetica": "helv", "Times": "tiro", "Courier": "cour"}[family]
+        variants = {
+            "helv": ("helv", "hebo", "heit", "hebi"),
+            "tiro": ("tiro", "tibo", "tiit", "tibi"),
+            "cour": ("cour", "cobo", "coit", "cobi"),
+        }
+        if bold and italic:
+            return variants[base][3]
+        if bold:
+            return variants[base][1]
+        if italic:
+            return variants[base][2]
+        return variants[base][0]
+
+    def _current_editor_style(self):
+        try:
+            size = max(4.0, float(self.font_size_var.get()))
+        except (TypeError, ValueError):
+            size = 11.0
+        flags = 0
+        if self.bold_var.get():
+            flags |= fitz.TEXT_FONT_BOLD
+        if self.italic_var.get():
+            flags |= fitz.TEXT_FONT_ITALIC
+        return {"font": self._selected_pdf_font(), "size": size, "flags": flags, "color": self._hex_to_rgb(self.text_color)}
+
+    @staticmethod
+    def _hex_to_rgb(color):
+        color = color.lstrip("#")
+        return tuple(int(color[index : index + 2], 16) / 255 for index in (0, 2, 4))
+
+    def _style_tag_name(self, style):
+        tag = f"pdf_style_{self.next_style_tag}"
+        self.next_style_tag += 1
+        self.style_tags[tag] = dict(style)
+        return tag
+
+    def _apply_style_tag(self, start, end, style):
+        tag = self._style_tag_name(style)
+        if style["font"].startswith("ti"):
+            family = "Times"
+        elif style["font"].startswith("co"):
+            family = "Courier"
+        else:
+            family = "Helvetica"
+        weight = "bold" if style["flags"] & fitz.TEXT_FONT_BOLD else "normal"
+        slant = "italic" if style["flags"] & fitz.TEXT_FONT_ITALIC else "roman"
+        preview_size = max(8, round(style["size"] * self.preview_scale_y))
+        self.inline_editor.tag_configure(tag, font=(family, preview_size, weight, slant), foreground=rgb_to_hex(style["color"]))
+        self.inline_editor.tag_add(tag, start, end)
+        self.inline_editor.tag_raise(tag)
+
+    def _apply_style_to_selection(self, _event=None):
+        if self.inline_editor is None:
+            return "break" if _event else None
+        try:
+            start, end = self.inline_editor.index("sel.first"), self.inline_editor.index("sel.last")
+        except tk.TclError:
+            self.status_var.set("Select text in the active editor before changing its attributes.")
+            return "break" if _event else None
+        style = self._current_editor_style()
+        self._apply_style_tag(start, end, style)
+        self.inline_changed = True
+        self.status_var.set("Applied attributes to the selected text only.")
+        return "break" if _event else None
+
+    def _set_attribute_bar_style(self, style):
+        self.font_family_var.set(self._font_family_label(style["font"]))
+        self.font_size_var.set(f"{style['size']:g}")
+        self.bold_var.set(bool(style["flags"] & fitz.TEXT_FONT_BOLD))
+        self.italic_var.set(bool(style["flags"] & fitz.TEXT_FONT_ITALIC))
+        self.text_color = rgb_to_hex(style["color"])
+        self.color_button.configure(background=self.text_color, activebackground=self.text_color)
+
+    def _sync_attribute_bar_to_selection(self, _event=None):
+        if self.inline_editor is None:
+            return
+        try:
+            tags = self.inline_editor.tag_names("sel.first")
+        except tk.TclError:
+            return
+        for tag in reversed(tags):
+            if tag in self.style_tags:
+                self._set_attribute_bar_style(self.style_tags[tag])
+                return
+
+    def _on_editor_key_release(self, event):
+        if event.char and event.char.isprintable() and not event.char.isspace():
+            self._inherit_style_for_typed_character()
+        self._sync_attribute_bar_to_selection()
+
+    def _style_at_index(self, index):
+        for tag in reversed(self.inline_editor.tag_names(index)):
+            if tag in self.style_tags:
+                return self.style_tags[tag]
+        return None
+
+    def _nearest_printable_style(self, index, direction):
+        """Find the next styled printable character in the requested direction."""
+        while self.inline_editor.compare(index, ">=", "1.0") and self.inline_editor.compare(index, "<=", "end-1c"):
+            character = self.inline_editor.get(index)
+            if character.isprintable() and not character.isspace():
+                return self._style_at_index(index)
+            index = self.inline_editor.index(f"{index} {direction}1c")
+        return None
+
+    def _inherit_style_for_typed_character(self):
+        """Style a new character only when its printable neighbours agree."""
+        if self.inline_editor is None:
+            return
+        inserted_start = self.inline_editor.index("insert -1c")
+        previous = self._nearest_printable_style(f"{inserted_start} -1c", "-")
+        following = self._nearest_printable_style("insert", "+")
+        if previous is not None and previous == following:
+            self._apply_style_tag(inserted_start, "insert", previous)
+
+    def _mark_inline_text_changed(self, _event=None):
+        if self.inline_editor.edit_modified():
+            self.inline_changed = True
+            self.inline_editor.edit_modified(False)
+
+    def _editor_runs(self, fallback_style):
+        """Return contiguous text runs using the highest-priority style tag."""
+        text = self.inline_editor.get("1.0", "end-1c")
+        runs = []
+        for offset, character in enumerate(text):
+            index = f"1.0+{offset}c"
+            style = fallback_style
+            for tag in reversed(self.inline_editor.tag_names(index)):
+                if tag in self.style_tags:
+                    style = self.style_tags[tag]
+                    break
+            if runs and runs[-1]["style"] == style:
+                runs[-1]["text"] += character
+            else:
+                runs.append({"text": character, "style": dict(style)})
+        return runs
+
+    def _choose_text_color(self):
+        selected, hex_color = colorchooser.askcolor(color=self.text_color, parent=self.root, title="Text color")
+        if hex_color:
+            self.text_color = hex_color
+            self.color_button.configure(background=hex_color, activebackground=hex_color)
+            self._apply_style_to_selection()
+
+    def commit_inline_edit(self, _event=None):
+        if self.inline_editor is None or self.selected_block_index is None:
+            return "break" if _event else None
+
+        block = self.page_blocks[self.selected_block_index]
+        updated_text = self.inline_editor.get("1.0", "end-1c")
+        page_edits = self.pending_edits.setdefault(self.current_page_index, {})
+        original_style = get_block_style(self.doc[self.current_page_index], block["block_index"])
+        if updated_text == block["text"] and not self.inline_changed:
+            page_edits.pop(block["block_index"], None)
+            if not page_edits:
+                self.pending_edits.pop(self.current_page_index, None)
+        else:
+            page_edits[block["block_index"]] = {
+                "text": updated_text,
+                "runs": self._editor_runs(original_style),
+                **original_style,
+            }
+
+        self.canvas.delete(self.inline_editor_window)
+        self.inline_editor_frame.destroy()
+        self.inline_editor = None
+        self.inline_editor_window = None
+        self.inline_editor_frame = None
+        self._set_attribute_bar_enabled(False)
         self._render_page_preview(self.doc[self.current_page_index])
+        self.status_var.set(f"Edit saved for page {self.current_page_index + 1}. Save the PDF when ready.")
+        return "break" if _event else None
 
     def _render_page_preview(self, page):
         if self.doc is None:
@@ -365,39 +814,94 @@ class PDFTextEditorApp:
 
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor="nw", image=self.page_image)
+        self.canvas.configure(scrollregion=(0, 0, pix.width, pix.height))
+        self.preview_scale_x = pix.width / page.rect.width
+        self.preview_scale_y = pix.height / page.rect.height
+        self._draw_pending_edit_overlays(page)
 
         if self.page_blocks and self.selected_block_index is not None:
             block = self.page_blocks[self.selected_block_index]
-            scale_x = pix.width / page.rect.width
-            scale_y = pix.height / page.rect.height
-            x0 = block["x0"] * scale_x
-            y0 = block["y0"] * scale_y
-            x1 = block["x1"] * scale_x
-            y1 = block["y1"] * scale_y
+            x0 = block["x0"] * self.preview_scale_x
+            y0 = block["y0"] * self.preview_scale_y
+            x1 = block["x1"] * self.preview_scale_x
+            y1 = block["y1"] * self.preview_scale_y
             self.canvas.create_rectangle(x0, y0, x1, y1, outline="#ff4a4a", width=3)
 
-    def apply_current_edit(self):
-        if not self.page_blocks or self.selected_block_index is None:
-            self.status_var.set("Select a text block before applying an edit.")
+    def _draw_pending_edit_overlays(self, page):
+        """Keep committed edits visible while the user continues editing the page."""
+        page_edits = self.pending_edits.get(self.current_page_index, {})
+        if not page_edits:
             return
 
-        updated_text = self.edit_text.get("1.0", "end-1c").strip()
-        if not updated_text:
-            self.status_var.set("Text cannot be empty.")
-            return
+        blocks_by_index = {block["block_index"]: block for block in self.page_blocks}
+        for block_index, replacement in page_edits.items():
+            block = blocks_by_index.get(block_index)
+            if block is None:
+                continue
 
-        block = self.page_blocks[self.selected_block_index]
-        page_key = self.current_page_index
-        self.pending_edits.setdefault(page_key, {})[block["block_index"]] = updated_text
-        self.status_var.set(f"Queued edit for page {page_key + 1}.")
+            x0 = block["x0"] * self.preview_scale_x
+            y0 = block["y0"] * self.preview_scale_y
+            x1 = block["x1"] * self.preview_scale_x
+            y1 = block["y1"] * self.preview_scale_y
+            style = get_block_style(page, block_index)
+            self.canvas.create_rectangle(x0 - 2, y0 - 2, x1 + 2, y1 + 2, fill="white", outline="")
+            if isinstance(replacement, dict) and replacement.get("runs"):
+                self._draw_canvas_runs(x0, y0, replacement["runs"], style)
+                continue
+            replacement, style = edit_value_and_style(replacement, style)
+            font_size = max(8, round(style["size"] * self.preview_scale_y))
+            if style["font"].startswith("ti"):
+                family = "Times"
+            elif style["font"].startswith("co"):
+                family = "Courier"
+            else:
+                family = "Helvetica"
+            weight = "bold" if style["flags"] & fitz.TEXT_FONT_BOLD else "normal"
+            slant = "italic" if style["flags"] & fitz.TEXT_FONT_ITALIC else "roman"
+            self.canvas.create_text(
+                x0,
+                y0,
+                anchor="nw",
+                text=replacement,
+                width=max(1, x1 - x0),
+                font=(family, font_size, weight, slant),
+                fill=rgb_to_hex(style["color"]),
+            )
+
+    def _draw_canvas_runs(self, x, y, runs, fallback_style):
+        """Render the saved rich-text runs in the preview without flattening them."""
+        cursor_x, cursor_y = x, y
+        line_height = 0
+        for run in runs:
+            style = dict(fallback_style)
+            style.update(run.get("style", {}))
+            if style["font"].startswith("ti"):
+                family = "Times"
+            elif style["font"].startswith("co"):
+                family = "Courier"
+            else:
+                family = "Helvetica"
+            weight = "bold" if style["flags"] & fitz.TEXT_FONT_BOLD else "normal"
+            slant = "italic" if style["flags"] & fitz.TEXT_FONT_ITALIC else "roman"
+            font = tkfont.Font(family=family, size=max(8, round(style["size"] * self.preview_scale_y)), weight=weight, slant=slant)
+            line_height = max(line_height, font.metrics("linespace"))
+            for part in str(run.get("text", "")).splitlines(keepends=True):
+                visible_text = part.rstrip("\n")
+                if visible_text:
+                    self.canvas.create_text(cursor_x, cursor_y, anchor="nw", text=visible_text, font=font, fill=rgb_to_hex(style["color"]))
+                    cursor_x += font.measure(visible_text)
+                if part.endswith("\n"):
+                    cursor_x = x
+                    cursor_y += line_height
 
     def save_edited_pdf(self):
         if self.doc is None:
             self.status_var.set("Open a PDF first.")
             return
 
+        self.commit_inline_edit()
         if not self.pending_edits:
-            messagebox.showinfo("No edits queued", "Apply a text change before saving.")
+            messagebox.showinfo("No edits made", "Make a text change in the document before saving.")
             return
 
         output_path = filedialog.asksaveasfilename(
