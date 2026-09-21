@@ -1,9 +1,11 @@
-# /usr/bin/python3 /home/eric/Python1/pdf_text_editor.py
-# eric@eric-OptiPlex-980:~/Python1$ /usr/bin/python3 /home/eric/Python1/pdf_text_editor.py
-# warning: The `fitz` API is deprecated and will be removed in future. Use `import pymupdf` instead.
+#  Special instrctions for creating executable with pyinstaller:
+# 
+# pyinstaller --onefile --noconsole --hidden-import PIL._tkinter_finder pdf_text_editor.py
+# 
+#  if --hidden-import is missing executable wont load pdf 
 #
 from __future__ import annotations
-
+import traceback
 import json
 import os
 import tkinter as tk
@@ -1020,6 +1022,8 @@ class PDFTextEditorApp:
 
 def main():
     root = tk.Tk()
+    root.report_callback_exception = lambda exc, val, tb: messagebox.showerror(
+        "Error", "".join(traceback.format_exception(exc, val, tb)))
     app = PDFTextEditorApp(root)
     root.mainloop()
 
