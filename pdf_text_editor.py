@@ -572,10 +572,13 @@ class PDFTextEditorApp:
         width = float(width)
         height = float(height)
 
+        self.commit_inline_edit()
+
         page_edits = self.pending_edits.setdefault(self.current_page_index, {})
         sections = page_edits.setdefault("__custom_sections__", [])
         offset_x = 0.0
         offset_y = 0.0
+        style = {"font": "helv", "size": 11, "flags": 0, "color": (0, 0, 0)}
         for _ in range(150):
             candidate = {
                 "id": self._next_custom_section_id(),
@@ -584,12 +587,8 @@ class PDFTextEditorApp:
                 "x1": left + width + offset_x,
                 "y1": top + height + offset_y,
                 "text": text,
-                "style": {
-                    "font": "helv",
-                    "size": 11,
-                    "flags": 0,
-                    "color": (0, 0, 0),
-                },
+                "runs": [{"text": str(text), "style": dict(style)}],
+                "style": dict(style),
             }
             if not any(
                 candidate["x0"] < existing["x1"] and candidate["x1"] > existing["x0"]
@@ -611,6 +610,7 @@ class PDFTextEditorApp:
             "x1": left + width,
             "y1": top + height,
             "text": text,
+            "runs": [{"text": str(text), "style": {"font": "helv", "size": 11, "flags": 0, "color": (0, 0, 0)}}],
             "style": {"font": "helv", "size": 11, "flags": 0, "color": (0, 0, 0)},
         }
         sections.append(candidate)
@@ -688,7 +688,8 @@ class PDFTextEditorApp:
             foreground=rgb_to_hex(style["color"]),
         )
         self.inline_editor.pack(fill="both", expand=True)
-        self.inline_editor.insert("1.0", str(section.get("text", "")))
+        displayed_text = str(section.get("text", ""))
+        self.inline_editor.insert("1.0", displayed_text)
         self.inline_editor.bind("<Control-Return>", self.commit_inline_edit)
         self.inline_editor.bind("<<Modified>>", self._mark_inline_text_changed)
         self.inline_editor.bind("<ButtonRelease-1>", self._sync_attribute_bar_to_selection)
@@ -696,6 +697,18 @@ class PDFTextEditorApp:
         self.style_tags = {}
         self.next_style_tag = 0
         self.inline_changed = False
+        initial_runs = section.get("runs") if isinstance(section.get("runs"), list) else []
+        offset = 0
+        for run in initial_runs:
+            run_text = str(run.get("text", ""))
+            if not run_text:
+                continue
+            run_style = dict(style)
+            run_style.update(run.get("style", {}))
+            self._apply_style_tag(f"1.0+{offset}c", f"1.0+{offset + len(run_text)}c", run_style)
+            offset += len(run_text)
+        if offset != len(displayed_text):
+            self._apply_style_tag("1.0", "end-1c", style)
         self._set_attribute_bar_enabled(True)
         width = max(90, (section["x1"] - section["x0"]) * self.preview_scale_x + 8)
         height = max(30, (section["y1"] - section["y0"]) * self.preview_scale_y + 8)
@@ -1337,15 +1350,20 @@ class PDFTextEditorApp:
             self.canvas.create_rectangle(x0, y0, x1, y1, fill=fill, outline="#4f8ef7", width=2)
             self.canvas.create_line(x1 - 8, y1 - 8, x1 + 8, y1 + 8, fill="#4f8ef7", width=2)
             self.canvas.create_line(x1 - 8, y1 + 8, x1 + 8, y1 - 8, fill="#4f8ef7", width=2)
-            self.canvas.create_text(
-                x0 + 6,
-                y0 + 4,
-                anchor="nw",
-                text=str(section.get("text", "")),
-                width=max(1, x1 - x0 - 12),
-                font=("Helvetica", -max(1, round(section["style"]["size"] * self.preview_scale_y))),
-                fill=rgb_to_hex(section["style"]["color"]),
-            )
+            runs = section.get("runs") if isinstance(section.get("runs"), list) else []
+            fallback_style = dict(section.get("style", {"font": "helv", "size": 11, "flags": 0, "color": (0, 0, 0)}))
+            if runs:
+                self._draw_canvas_runs(x0 + 6, y0 + 4, runs, fallback_style)
+            else:
+                self.canvas.create_text(
+                    x0 + 6,
+                    y0 + 4,
+                    anchor="nw",
+                    text=str(section.get("text", "")),
+                    width=max(1, x1 - x0 - 12),
+                    font=("Helvetica", -max(1, round(fallback_style["size"] * self.preview_scale_y))),
+                    fill=rgb_to_hex(fallback_style["color"]),
+                )
 
     def _draw_canvas_runs(self, x, y, runs, fallback_style):
         """Render the saved rich-text runs in the preview without flattening them."""
