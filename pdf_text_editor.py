@@ -236,9 +236,60 @@ def apply_pdf_text_edits(pdf_path, edits_by_page):
         if not page_edits:
             continue
 
+        custom_sections = page_edits.get("__custom_sections__", [])
+        for section in custom_sections:
+            rect = fitz.Rect(
+                float(section["x0"]),
+                float(section["y0"]),
+                float(section["x1"]),
+                float(section["y1"]),
+            )
+            style = dict(section.get("style", {"font": "helv", "size": 11, "flags": 0, "color": (0, 0, 0)}))
+            target_page.draw_rect(rect, fill=(1, 1, 1), color=(1, 1, 1), overlay=True)
+            runs = section.get("runs")
+            if isinstance(runs, list) and runs:
+                html = styled_runs_to_html(runs, style)
+                spare_height, scale = target_page.insert_htmlbox(
+                    rect,
+                    html,
+                    css="body { margin: 0; padding: 0; line-height: 1.15; }",
+                    scale_low=0,
+                )
+                if spare_height < 0 or scale == 0:
+                    raise ValueError(
+                        f"The custom text section on page {page_index + 1} does not fit within its bounding box."
+                    )
+                continue
+            text = str(section.get("text", ""))
+            font_size = float(style["size"])
+            result = target_page.insert_textbox(
+                rect,
+                normalize_insert_text(text),
+                fontsize=font_size,
+                fontname=style["font"],
+                color=tuple(style["color"]),
+                align=fitz.TEXT_ALIGN_LEFT,
+            )
+            while result < 0 and font_size > 4:
+                font_size -= 0.5
+                result = target_page.insert_textbox(
+                    rect,
+                    normalize_insert_text(text),
+                    fontsize=font_size,
+                    fontname=style["font"],
+                    color=tuple(style["color"]),
+                    align=fitz.TEXT_ALIGN_LEFT,
+                )
+            if result < 0:
+                raise ValueError(
+                    f"The custom text section on page {page_index + 1} does not fit within its bounding box."
+                )
+
         blocks = source_page.get_text("blocks")
         for block_index, edit in page_edits.items():
-            if block_index >= len(blocks):
+            if block_index == "__custom_sections__":
+                continue
+            if not isinstance(block_index, int) or block_index >= len(blocks):
                 continue
 
             x0, y0, x1, y1 = blocks[block_index][:4]
@@ -267,9 +318,6 @@ def apply_pdf_text_edits(pdf_path, edits_by_page):
                 color=tuple(style["color"]),
                 align=fitz.TEXT_ALIGN_LEFT,
             )
-            # A replacement must remain in its original block.  If it is too
-            # long, reduce its size only as much as needed rather than writing
-            # over the next section of the page.
             while result < 0 and font_size > 4:
                 font_size -= 0.5
                 result = target_page.insert_textbox(
@@ -369,6 +417,10 @@ class PDFTextEditorApp:
         self.page_image = None
         self.preview_scale_x = 1.0
         self.preview_scale_y = 1.0
+        self.selected_custom_section_id = None
+        self.custom_section_counter = 0
+        self.section_drag_state = None
+        self.section_resize_state = None
         self.inline_editor = None
         self.inline_editor_window = None
         self.inline_editor_frame = None
@@ -391,6 +443,7 @@ class PDFTextEditorApp:
         toolbar.pack(fill="x")
 
         ttk.Button(toolbar, text="Open PDF", command=self.open_pdf).pack(side="left")
+        ttk.Button(toolbar, text="Add Text Section", command=self.add_custom_text_section).pack(side="left", padx=(8, 0))
         ttk.Button(toolbar, text="Save Edited PDF", command=self.save_edited_pdf).pack(side="left", padx=(8, 0))
         ttk.Button(toolbar, text="Reset attributes bar", command=self._reset_attribute_bar).pack(side="left", padx=(8, 0))
 
@@ -430,6 +483,8 @@ class PDFTextEditorApp:
         vertical_scroll.grid(row=0, column=1, sticky="ns")
         horizontal_scroll.grid(row=1, column=0, sticky="ew")
         self.canvas.bind("<Button-1>", self.on_canvas_clicked)
+        self.canvas.bind("<B1-Motion>", self._handle_custom_section_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._finish_custom_section_drag)
         self._build_attribute_bar()
 
     def _build_attribute_bar(self):
@@ -501,6 +556,160 @@ class PDFTextEditorApp:
         state = "normal" if enabled else "disabled"
         for control in self.attribute_controls:
             control.configure(state=state)
+
+    def _next_custom_section_id(self):
+        self.custom_section_counter += 1
+        return f"custom-section-{self.custom_section_counter}"
+
+    def _add_new_text_section(self, x=None, y=None, width=180, height=46, text="New text"):
+        if self.doc is None:
+            return None
+
+        page = self.doc[self.current_page_index]
+        rect = page.rect
+        left = float(x if x is not None else rect.width * 0.12)
+        top = float(y if y is not None else rect.height * 0.12)
+        width = float(width)
+        height = float(height)
+
+        page_edits = self.pending_edits.setdefault(self.current_page_index, {})
+        sections = page_edits.setdefault("__custom_sections__", [])
+        offset_x = 0.0
+        offset_y = 0.0
+        for _ in range(150):
+            candidate = {
+                "id": self._next_custom_section_id(),
+                "x0": left + offset_x,
+                "y0": top + offset_y,
+                "x1": left + width + offset_x,
+                "y1": top + height + offset_y,
+                "text": text,
+                "style": {
+                    "font": "helv",
+                    "size": 11,
+                    "flags": 0,
+                    "color": (0, 0, 0),
+                },
+            }
+            if not any(
+                candidate["x0"] < existing["x1"] and candidate["x1"] > existing["x0"]
+                and candidate["y0"] < existing["y1"] and candidate["y1"] > existing["y0"]
+                for existing in sections
+            ):
+                sections.append(candidate)
+                self.selected_custom_section_id = candidate["id"]
+                self._render_page_preview(page)
+                return candidate
+            offset_x += 18
+            if offset_x > rect.width:
+                offset_x = 0
+                offset_y += 18
+        candidate = {
+            "id": self._next_custom_section_id(),
+            "x0": left,
+            "y0": top,
+            "x1": left + width,
+            "y1": top + height,
+            "text": text,
+            "style": {"font": "helv", "size": 11, "flags": 0, "color": (0, 0, 0)},
+        }
+        sections.append(candidate)
+        self.selected_custom_section_id = candidate["id"]
+        self._render_page_preview(page)
+        return candidate
+
+    def _resize_text_section(self, section_id, x=None, y=None, width=None, height=None):
+        page_edits = self.pending_edits.get(self.current_page_index, {})
+        for section in page_edits.get("__custom_sections__", []):
+            if section.get("id") != section_id:
+                continue
+            left = float(x if x is not None else section["x0"])
+            top = float(y if y is not None else section["y0"])
+            new_width = float(width if width is not None else section["x1"] - section["x0"])
+            new_height = float(height if height is not None else section["y1"] - section["y0"])
+            section["x0"] = left
+            section["y0"] = top
+            section["x1"] = left + new_width
+            section["y1"] = top + new_height
+            if self.doc is not None:
+                self._render_page_preview(self.doc[self.current_page_index])
+            return section
+        return None
+
+    def add_custom_text_section(self):
+        if self.doc is None:
+            self.status_var.set("Open a PDF before adding a text section.")
+            return
+        page = self.doc[self.current_page_index]
+        section = self._add_new_text_section(
+            x=page.rect.width * 0.18,
+            y=page.rect.height * 0.18,
+            width=180,
+            height=44,
+        )
+        if section is not None:
+            self.status_var.set(f"Added text section {section['id']} on page {self.current_page_index + 1}.")
+            self._show_inline_editor_for_custom_section(section["id"])
+
+    def _custom_section_at_canvas_position(self, x, y):
+        for section in self.pending_edits.get(self.current_page_index, {}).get("__custom_sections__", []):
+            if (
+                section["x0"] * self.preview_scale_x <= x <= section["x1"] * self.preview_scale_x
+                and section["y0"] * self.preview_scale_y <= y <= section["y1"] * self.preview_scale_y
+            ):
+                return section
+        return None
+
+    def _show_inline_editor_for_custom_section(self, section_id):
+        section = None
+        for candidate in self.pending_edits.get(self.current_page_index, {}).get("__custom_sections__", []):
+            if candidate.get("id") == section_id:
+                section = candidate
+                break
+        if section is None:
+            return
+
+        self.selected_block_index = None
+        self.selected_custom_section_id = section_id
+        style = dict(section.get("style", {"font": "helv", "size": 11, "flags": 0, "color": (0, 0, 0)}))
+        self._set_attribute_bar_style(style)
+        self.inline_editor_frame = tk.Frame(
+            self.canvas, bg="#f5f8ff", highlightthickness=1, highlightbackground="#2b78e4"
+        )
+        self.inline_editor = tk.Text(
+            self.inline_editor_frame,
+            wrap="word",
+            undo=True,
+            exportselection=False,
+            relief="solid",
+            borderwidth=1,
+            highlightthickness=0,
+            font=self._tk_font_tuple(style),
+            foreground=rgb_to_hex(style["color"]),
+        )
+        self.inline_editor.pack(fill="both", expand=True)
+        self.inline_editor.insert("1.0", str(section.get("text", "")))
+        self.inline_editor.bind("<Control-Return>", self.commit_inline_edit)
+        self.inline_editor.bind("<<Modified>>", self._mark_inline_text_changed)
+        self.inline_editor.bind("<ButtonRelease-1>", self._sync_attribute_bar_to_selection)
+        self.inline_editor.bind("<KeyRelease>", self._on_editor_key_release)
+        self.style_tags = {}
+        self.next_style_tag = 0
+        self.inline_changed = False
+        self._set_attribute_bar_enabled(True)
+        width = max(90, (section["x1"] - section["x0"]) * self.preview_scale_x + 8)
+        height = max(30, (section["y1"] - section["y0"]) * self.preview_scale_y + 8)
+        self.inline_editor_window = self.canvas.create_window(
+            section["x0"] * self.preview_scale_x,
+            section["y0"] * self.preview_scale_y,
+            anchor="nw",
+            width=width,
+            height=height,
+            window=self.inline_editor_frame,
+        )
+        self.inline_editor.focus_set()
+        self.inline_editor.edit_modified(False)
+        self.status_var.set("Edit the custom text section, then click elsewhere or press Ctrl+Enter to keep it.")
 
     def open_pdf(self):
         pdf_path = filedialog.askopenfilename(
@@ -597,15 +806,146 @@ class PDFTextEditorApp:
             )
         return blocks
 
+    def _custom_section_resize_handle(self, section, canvas_x, canvas_y):
+        handle_x = section["x1"] * self.preview_scale_x
+        handle_y = section["y1"] * self.preview_scale_y
+        return abs(canvas_x - handle_x) <= 10 and abs(canvas_y - handle_y) <= 10
+
+    def _start_custom_section_drag(self, section_id, canvas_x, canvas_y, *, mode):
+        for section in self.pending_edits.get(self.current_page_index, {}).get("__custom_sections__", []):
+            if section.get("id") != section_id:
+                continue
+            if mode == "resize":
+                self.section_resize_state = {
+                    "section_id": section_id,
+                    "start_canvas_x": canvas_x,
+                    "start_canvas_y": canvas_y,
+                    "initial_x0": section["x0"],
+                    "initial_y0": section["y0"],
+                    "initial_x1": section["x1"],
+                    "initial_y1": section["y1"],
+                }
+            else:
+                self.section_drag_state = {
+                    "section_id": section_id,
+                    "start_canvas_x": canvas_x,
+                    "start_canvas_y": canvas_y,
+                    "initial_x0": section["x0"],
+                    "initial_y0": section["y0"],
+                    "initial_x1": section["x1"],
+                    "initial_y1": section["y1"],
+                }
+            break
+
+    def _handle_custom_section_drag(self, event):
+        if self.section_drag_state is None and self.section_resize_state is None:
+            return
+
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        if self.section_resize_state is not None:
+            state = self.section_resize_state
+            section = next(
+                (
+                    item
+                    for item in self.pending_edits.get(self.current_page_index, {}).get("__custom_sections__", [])
+                    if item.get("id") == state["section_id"]
+                ),
+                None,
+            )
+            if section is None:
+                return
+            dx = (canvas_x - state["start_canvas_x"]) / self.preview_scale_x
+            dy = (canvas_y - state["start_canvas_y"]) / self.preview_scale_y
+            section["x1"] = max(state["initial_x1"] + dx, state["initial_x0"] + 30)
+            section["y1"] = max(state["initial_y1"] + dy, state["initial_y0"] + 18)
+            self._render_page_preview(self.doc[self.current_page_index])
+            return
+
+        state = self.section_drag_state
+        section = next(
+            (
+                item
+                for item in self.pending_edits.get(self.current_page_index, {}).get("__custom_sections__", [])
+                if item.get("id") == state["section_id"]
+            ),
+            None,
+        )
+        if section is None:
+            return
+        dx = (canvas_x - state["start_canvas_x"]) / self.preview_scale_x
+        dy = (canvas_y - state["start_canvas_y"]) / self.preview_scale_y
+        width = state["initial_x1"] - state["initial_x0"]
+        height = state["initial_y1"] - state["initial_y0"]
+        section["x0"] = max(0, state["initial_x0"] + dx)
+        section["y0"] = max(0, state["initial_y0"] + dy)
+        section["x1"] = section["x0"] + width
+        section["y1"] = section["y0"] + height
+        self._render_page_preview(self.doc[self.current_page_index])
+
+    def _finish_custom_section_drag(self, event=None):
+        if self.section_drag_state is not None:
+            state = self.section_drag_state
+            if self.selected_custom_section_id == state["section_id"] and self.inline_editor is None:
+                self._show_inline_editor_for_custom_section(state["section_id"])
+        self.section_drag_state = None
+        self.section_resize_state = None
+
+    def _begin_custom_section_drag_from_editor(self, event):
+        if self.selected_custom_section_id is None or self.doc is None:
+            return
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        section = next(
+            (
+                item
+                for item in self.pending_edits.get(self.current_page_index, {}).get("__custom_sections__", [])
+                if item.get("id") == self.selected_custom_section_id
+            ),
+            None,
+        )
+        if section is None:
+            return
+        if self._custom_section_resize_handle(section, canvas_x, canvas_y):
+            self._start_custom_section_drag(section["id"], canvas_x, canvas_y, mode="resize")
+            return
+        self._start_custom_section_drag(section["id"], canvas_x, canvas_y, mode="move")
+
     def on_canvas_clicked(self, event):
-        """Open an editor over the text block clicked in the page preview."""
+        """Open an editor over the text block or custom section clicked in the page preview."""
         if not self.doc:
             return
 
-        clicked_index = self._block_at_canvas_position(self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        custom_section = self._custom_section_at_canvas_position(canvas_x, canvas_y)
+        if custom_section is not None:
+            if self._custom_section_resize_handle(custom_section, canvas_x, canvas_y):
+                self.commit_inline_edit()
+                self.selected_custom_section_id = custom_section["id"]
+                self.selected_block_index = None
+                self._start_custom_section_drag(custom_section["id"], canvas_x, canvas_y, mode="resize")
+                self._render_page_preview(self.doc[self.current_page_index])
+                return
+
+            self.selected_custom_section_id = custom_section["id"]
+            self.selected_block_index = None
+            self.section_drag_state = {
+                "section_id": custom_section["id"],
+                "start_canvas_x": canvas_x,
+                "start_canvas_y": canvas_y,
+                "initial_x0": custom_section["x0"],
+                "initial_y0": custom_section["y0"],
+                "initial_x1": custom_section["x1"],
+                "initial_y1": custom_section["y1"],
+            }
+            return
+
+        clicked_index = self._block_at_canvas_position(canvas_x, canvas_y)
         if clicked_index is None:
             self.commit_inline_edit()
             self.selected_block_index = None
+            self.selected_custom_section_id = None
             self._render_page_preview(self.doc[self.current_page_index])
             return
 
@@ -615,6 +955,7 @@ class PDFTextEditorApp:
 
         self.commit_inline_edit()
         self.selected_block_index = clicked_index
+        self.selected_custom_section_id = None
         self._render_page_preview(self.doc[self.current_page_index])
         self._show_inline_editor(clicked_index)
 
@@ -864,23 +1205,51 @@ class PDFTextEditorApp:
             self._apply_style_to_selection()
 
     def commit_inline_edit(self, _event=None):
-        if self.inline_editor is None or self.selected_block_index is None:
+        if self.inline_editor is None:
+            if self.selected_block_index is None and self.selected_custom_section_id is None:
+                return "break" if _event else None
             return "break" if _event else None
 
-        block = self.page_blocks[self.selected_block_index]
-        updated_text = self.inline_editor.get("1.0", "end-1c")
-        page_edits = self.pending_edits.setdefault(self.current_page_index, {})
-        original_style = get_block_style(self.doc[self.current_page_index], block["block_index"])
-        if updated_text == block["text"] and not self.inline_changed:
-            page_edits.pop(block["block_index"], None)
-            if not page_edits:
-                self.pending_edits.pop(self.current_page_index, None)
+        if self.selected_custom_section_id is not None:
+            page_edits = self.pending_edits.setdefault(self.current_page_index, {})
+            sections = page_edits.setdefault("__custom_sections__", [])
+            for section in sections:
+                if section.get("id") != self.selected_custom_section_id:
+                    continue
+                updated_text = self.inline_editor.get("1.0", "end-1c")
+                style = dict(section.get("style", {"font": "helv", "size": 11, "flags": 0, "color": (0, 0, 0)}))
+                style.update({
+                    "font": self._selected_pdf_font(),
+                    "size": max(4.0, float(self.font_size_var.get())),
+                    "flags": 0,
+                    "color": self._hex_to_rgb(self.text_color),
+                })
+                if self.bold_var.get():
+                    style["flags"] |= fitz.TEXT_FONT_BOLD
+                if self.italic_var.get():
+                    style["flags"] |= fitz.TEXT_FONT_ITALIC
+                section["text"] = updated_text
+                section["runs"] = self._editor_runs(style)
+                section["style"] = style
+                break
+            self.selected_custom_section_id = None
         else:
-            page_edits[block["block_index"]] = {
-                "text": updated_text,
-                "runs": self._editor_runs(original_style),
-                **original_style,
-            }
+            if self.selected_block_index is None:
+                return "break" if _event else None
+            block = self.page_blocks[self.selected_block_index]
+            updated_text = self.inline_editor.get("1.0", "end-1c")
+            page_edits = self.pending_edits.setdefault(self.current_page_index, {})
+            original_style = get_block_style(self.doc[self.current_page_index], block["block_index"])
+            if updated_text == block["text"] and not self.inline_changed:
+                page_edits.pop(block["block_index"], None)
+                if not page_edits:
+                    self.pending_edits.pop(self.current_page_index, None)
+            else:
+                page_edits[block["block_index"]] = {
+                    "text": updated_text,
+                    "runs": self._editor_runs(original_style),
+                    **original_style,
+                }
 
         self.canvas.delete(self.inline_editor_window)
         self.inline_editor_frame.destroy()
@@ -924,6 +1293,8 @@ class PDFTextEditorApp:
 
         blocks_by_index = {block["block_index"]: block for block in self.page_blocks}
         for block_index, replacement in page_edits.items():
+            if block_index == "__custom_sections__":
+                continue
             block = blocks_by_index.get(block_index)
             if block is None:
                 continue
@@ -955,6 +1326,25 @@ class PDFTextEditorApp:
                 width=max(1, x1 - x0),
                 font=(family, font_size, weight, slant),
                 fill=rgb_to_hex(style["color"]),
+            )
+
+        for section in page_edits.get("__custom_sections__", []):
+            x0 = section["x0"] * self.preview_scale_x
+            y0 = section["y0"] * self.preview_scale_y
+            x1 = section["x1"] * self.preview_scale_x
+            y1 = section["y1"] * self.preview_scale_y
+            fill = "#d9ebff" if section.get("id") == self.selected_custom_section_id else "#f2f7ff"
+            self.canvas.create_rectangle(x0, y0, x1, y1, fill=fill, outline="#4f8ef7", width=2)
+            self.canvas.create_line(x1 - 8, y1 - 8, x1 + 8, y1 + 8, fill="#4f8ef7", width=2)
+            self.canvas.create_line(x1 - 8, y1 + 8, x1 + 8, y1 - 8, fill="#4f8ef7", width=2)
+            self.canvas.create_text(
+                x0 + 6,
+                y0 + 4,
+                anchor="nw",
+                text=str(section.get("text", "")),
+                width=max(1, x1 - x0 - 12),
+                font=("Helvetica", -max(1, round(section["style"]["size"] * self.preview_scale_y))),
+                fill=rgb_to_hex(section["style"]["color"]),
             )
 
     def _draw_canvas_runs(self, x, y, runs, fallback_style):
