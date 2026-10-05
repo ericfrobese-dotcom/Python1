@@ -8,6 +8,7 @@ from pdf_text_editor import (
     get_block_style,
     normalize_font_name,
     normalize_insert_text,
+    style_to_css,
 )
 
 
@@ -119,6 +120,74 @@ def test_style_and_ligature_handling_for_bold_text():
     assert style["font"] in {"hebo", "helv"}
     assert normalize_insert_text("Conﬁrmation") == "Confirmation"
     doc.close()
+
+
+def test_style_to_css_includes_underline():
+    style = {"font": "helv", "size": 12, "flags": 0, "color": (0, 0, 0), "underline": True}
+    assert "text-decoration: underline" in style_to_css(style)
+
+
+def test_custom_section_commit_uses_editor_base_style_for_untagged_text():
+    base_style = {"font": "helv", "size": 11, "flags": 0, "color": (0, 0, 0)}
+    selected_style = {
+        "font": "tiro",
+        "size": 16,
+        "flags": fitz.TEXT_FONT_BOLD,
+        "color": (1, 0, 0),
+    }
+
+    class _FakeText:
+        text = "default\nstyled\nnew line"
+
+        def get(self, _start, _end):
+            return self.text
+
+        def tag_names(self, index):
+            offset = int(index.split("+")[1].split("c")[0])
+            return ("selected",) if 8 <= offset < 14 else ()
+
+    class _FakeCanvas:
+        def delete(self, _item):
+            pass
+
+    class _FakeFrame:
+        def destroy(self):
+            pass
+
+    app = PDFTextEditorApp.__new__(PDFTextEditorApp)
+    app.inline_editor = _FakeText()
+    app.inline_editor_frame = _FakeFrame()
+    app.inline_editor_window = 1
+    app.canvas = _FakeCanvas()
+    app.pending_edits = {
+        0: {
+            "__custom_sections__": [
+                {"id": "section", "text": "default", "runs": [], "style": dict(base_style)}
+            ]
+        }
+    }
+    app.current_page_index = 0
+    app.selected_custom_section_id = "section"
+    app.selected_block_index = None
+    app.style_tags = {"selected": selected_style}
+    app.attribute_controls = []
+    app.doc = [None]
+    app._render_page_preview = lambda _page: None
+
+    class _FakeStatus:
+        def set(self, _message):
+            pass
+
+    app.status_var = _FakeStatus()
+    PDFTextEditorApp.commit_inline_edit(app)
+
+    section = app.pending_edits[0]["__custom_sections__"][0]
+    assert section["style"] == base_style
+    assert section["runs"] == [
+        {"text": "default\n", "style": base_style},
+        {"text": "styled", "style": selected_style},
+        {"text": "\nnew line", "style": base_style},
+    ]
 
 
 def test_extract_pdf_text_blocks_handles_basic_pdf(tmp_path):
@@ -246,7 +315,16 @@ def test_apply_pdf_text_edits_preserves_custom_section_run_styles(tmp_path):
                     "text": "Red bold text and blue italic text",
                     "runs": [
                         {"text": "Red bold ", "style": {"font": "helv", "size": 12, "flags": fitz.TEXT_FONT_BOLD, "color": (1, 0, 0)}},
-                        {"text": "blue italic text", "style": {"font": "tiro", "size": 12, "flags": fitz.TEXT_FONT_ITALIC, "color": (0, 0, 1)}},
+                        {
+                            "text": "blue italic text",
+                            "style": {
+                                "font": "tiro",
+                                "size": 12,
+                                "flags": fitz.TEXT_FONT_ITALIC,
+                                "underline": True,
+                                "color": (0, 0, 1),
+                            },
+                        },
                     ],
                     "style": {"font": "helv", "size": 12, "flags": 0, "color": (0, 0, 0)},
                 }

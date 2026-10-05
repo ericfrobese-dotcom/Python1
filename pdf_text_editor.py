@@ -169,6 +169,7 @@ def style_to_css(style):
         f"font-family: {font_family}; font-size: {float(style['size']):g}pt; "
         f"font-weight: {'bold' if style['flags'] & fitz.TEXT_FONT_BOLD else 'normal'}; "
         f"font-style: {'italic' if style['flags'] & fitz.TEXT_FONT_ITALIC else 'normal'}; "
+        f"text-decoration: {'underline' if style.get('underline', False) else 'none'}; "
         f"color: {rgb_to_hex(style['color'])};"
     )
 
@@ -428,6 +429,7 @@ class PDFTextEditorApp:
         self.font_size_var = None
         self.bold_var = None
         self.italic_var = None
+        self.underline_var = None
         self.text_color = "#000000"
         self.style_tags = {}
         self.next_style_tag = 0
@@ -501,6 +503,7 @@ class PDFTextEditorApp:
         self.font_size_var = tk.StringVar(value="11")
         self.bold_var = tk.BooleanVar(value=False)
         self.italic_var = tk.BooleanVar(value=False)
+        self.underline_var = tk.BooleanVar(value=False)
         self.font_selector = ttk.Combobox(self.attribute_bar, textvariable=self.font_family_var,
                                           values=("Helvetica", "Times", "Courier"), state="readonly", width=10)
         self.font_selector.pack(side="left")
@@ -512,9 +515,19 @@ class PDFTextEditorApp:
         self.italic_button = ttk.Checkbutton(self.attribute_bar, text="I", variable=self.italic_var,
                                              command=self._apply_style_to_selection)
         self.italic_button.pack(side="left")
+        self.underline_button = ttk.Checkbutton(self.attribute_bar, text="U", variable=self.underline_var,
+                                                command=self._apply_style_to_selection)
+        self.underline_button.pack(side="left")
         self.color_button = tk.Button(self.attribute_bar, text="Color", command=self._choose_text_color, width=6)
         self.color_button.pack(side="left", padx=(4, 0))
-        self.attribute_controls = [self.font_selector, self.size_entry, self.bold_button, self.italic_button, self.color_button]
+        self.attribute_controls = [
+            self.font_selector,
+            self.size_entry,
+            self.bold_button,
+            self.italic_button,
+            self.underline_button,
+            self.color_button,
+        ]
         self.font_selector.bind("<<ComboboxSelected>>", self._apply_style_to_selection)
         self.size_entry.configure(command=self._apply_style_to_selection)
         self.size_entry.bind("<Return>", self._apply_style_to_selection)
@@ -1100,7 +1113,13 @@ class PDFTextEditorApp:
             flags |= fitz.TEXT_FONT_BOLD
         if self.italic_var.get():
             flags |= fitz.TEXT_FONT_ITALIC
-        return {"font": self._selected_pdf_font(), "size": size, "flags": flags, "color": self._hex_to_rgb(self.text_color)}
+        return {
+            "font": self._selected_pdf_font(),
+            "size": size,
+            "flags": flags,
+            "underline": self.underline_var.get(),
+            "color": self._hex_to_rgb(self.text_color),
+        }
 
     @staticmethod
     def _hex_to_rgb(color):
@@ -1119,6 +1138,7 @@ class PDFTextEditorApp:
             tag,
             font=self._tk_font_tuple(style),
             foreground=rgb_to_hex(style["color"]),
+            underline=bool(style.get("underline", False)),
         )
         self.inline_editor.tag_add(tag, start, end)
         self.inline_editor.tag_raise(tag)
@@ -1142,6 +1162,7 @@ class PDFTextEditorApp:
         self.font_size_var.set(f"{style['size']:g}")
         self.bold_var.set(bool(style["flags"] & fitz.TEXT_FONT_BOLD))
         self.italic_var.set(bool(style["flags"] & fitz.TEXT_FONT_ITALIC))
+        self.underline_var.set(bool(style.get("underline", False)))
         self.text_color = rgb_to_hex(style["color"])
         self.color_button.configure(background=self.text_color, activebackground=self.text_color)
 
@@ -1231,16 +1252,6 @@ class PDFTextEditorApp:
                     continue
                 updated_text = self.inline_editor.get("1.0", "end-1c")
                 style = dict(section.get("style", {"font": "helv", "size": 11, "flags": 0, "color": (0, 0, 0)}))
-                style.update({
-                    "font": self._selected_pdf_font(),
-                    "size": max(4.0, float(self.font_size_var.get())),
-                    "flags": 0,
-                    "color": self._hex_to_rgb(self.text_color),
-                })
-                if self.bold_var.get():
-                    style["flags"] |= fitz.TEXT_FONT_BOLD
-                if self.italic_var.get():
-                    style["flags"] |= fitz.TEXT_FONT_ITALIC
                 section["text"] = updated_text
                 section["runs"] = self._editor_runs(style)
                 section["style"] = style
@@ -1385,6 +1396,7 @@ class PDFTextEditorApp:
                 size=-max(1, round(style["size"] * self.preview_scale_y)),
                 weight=weight,
                 slant=slant,
+                underline=bool(style.get("underline", False)),
             )
             line_height = max(line_height, font.metrics("linespace"))
             for part in str(run.get("text", "")).splitlines(keepends=True):
