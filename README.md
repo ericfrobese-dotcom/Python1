@@ -10,8 +10,8 @@ A collection of lightweight Python utility programs created to solve everyday de
 | :--- | :--- | :--- |
 | **TCP/IP Tester** | Quickly test socket connections and send/receive files over TCP/IP. | Windows / Linux |
 | **Digital Soundboard** | Custom soundboard with pre-loaded sound files and instant playback. | Windows / Linux |
-| **PDF Text Editor** | Lightweight PDF text editing tool designed for Linux environments. | Windows / Linux |
-| **USB Device Viewer** | Graphical/CLI viewer to inspect connected USB devices and properties. | Linux Win_ version for Windows|
+| **PDF Text Editor** | Lightweight PDF text editing tool can edit or add new text sections. | Windows / Linux |
+| **USB Device Viewer** | Graphical/CLI viewer to inspect connected USB devices and properties. Different code versions for Windows | Linux Win_ version for Windows|
 | **File Propagator** | Monitors a directory and automatically sends new files to backup/replica locations on other machines. | Windows / Linux |
 | **Phone Camera** | Streams an Android phone's camera and microphone over Wi-Fi to OBS using a browser sender. | Windows / Linux |
 
