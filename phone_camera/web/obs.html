@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Phone Camera OBS Feed</title>
+<style>
+html,body{margin:0;width:100%;height:100%;background:#000;color:#eee;font:16px system-ui}
+video{width:100%;height:100%;object-fit:contain}
+#msg{position:absolute;top:8px;left:8px;background:#222b;padding:8px;max-width:90%}
+#audio{position:absolute;right:8px;bottom:8px;padding:10px;background:#333;color:#fff;border:0;border-radius:4px}
+</style>
+<video id="feed" autoplay muted playsinline></video>
+<div id="msg">Connecting to signaling server…</div>
+<button id="audio" hidden>Enable audio</button>
+<script>
+const video=document.querySelector('#feed'),msg=document.querySelector('#msg'),audioButton=document.querySelector('#audio');
+let ws,pc,media=new MediaStream();
+function waitForIce(peer){
+  if(peer.iceGatheringState==='complete')return Promise.resolve();
+  return new Promise(resolve=>peer.addEventListener('icegatheringstatechange',()=>peer.iceGatheringState==='complete'&&resolve()));
+}
+function closePeer(message='Waiting for phone…'){
+  if(pc){pc.close();pc=null}media.getTracks().forEach(t=>media.removeTrack(t));media=new MediaStream();
+  video.srcObject=null;audioButton.hidden=true;msg.style.display='block';msg.textContent=message;
+}
+audioButton.onclick=async()=>{video.muted=false;try{await video.play();audioButton.hidden=true}catch(e){msg.textContent=`Playback error: ${e.message}`}};
+async function answerOffer(offer){
+  closePeer('Phone connected; preparing video…');
+  const peer=new RTCPeerConnection({iceServers:[]});pc=peer;
+  peer.addTransceiver('video',{direction:'recvonly'});peer.addTransceiver('audio',{direction:'recvonly'});
+  peer.ontrack=async event=>{
+    if(pc!==peer)return;
+    if(!media.getTracks().some(t=>t.id===event.track.id))media.addTrack(event.track);
+    video.srcObject=media;
+    event.track.onended=()=>{if(pc===peer)closePeer('Video track ended; waiting for sender…')};
+    if(event.track.kind==='video'){
+      try{await video.play();msg.style.display='none';audioButton.hidden=false}
+      catch(error){if(error.name!=='AbortError'){msg.style.display='block';msg.textContent=`Video playback error: ${error.message}`}}
+    }
+  };
+  peer.onconnectionstatechange=()=>{
+    if(pc!==peer)return;
+    if(peer.connectionState==='connected'&&media.getVideoTracks().length){msg.style.display='none';return}
+    msg.style.display='block';msg.textContent=`Viewer ${peer.connectionState}; ICE ${peer.iceConnectionState}`;
+  };
+  peer.oniceconnectionstatechange=()=>{
+    if(pc===peer&&!media.getVideoTracks().length){msg.style.display='block';msg.textContent=`Viewer ${peer.connectionState}; ICE ${peer.iceConnectionState}`}
+  };
+  try{
+    await peer.setRemoteDescription(offer);
+    const answer=await peer.createAnswer();await peer.setLocalDescription(answer);await waitForIce(peer);
+    if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(peer.localDescription));
+    else throw new Error('Signaling connection closed');
+    msg.style.display='block';msg.textContent='Answer sent; connecting directly to phone…';
+  }catch(e){closePeer(`Viewer negotiation error: ${e.message}`)}
+}
+function connect(){
+  const scheme=location.protocol==='https:'?'wss:':'ws:';
+  ws=new WebSocket(`${scheme}//${location.host}/signal?role=viewer`);
+  ws.onopen=()=>{msg.style.display='block';msg.textContent='Connected to signaling server; waiting for phone…'};
+  ws.onmessage=event=>{
+    let message;try{message=JSON.parse(event.data)}catch(e){return}
+    if(message.type==='offer')answerOffer(message);
+    else if(message.type==='bye')closePeer('Phone sender disconnected. Waiting for phone…');
+    else if(message.type==='error')msg.textContent=`Signaling error: ${message.message}`;
+  };
+  ws.onerror=()=>{msg.style.display='block';msg.textContent='Signaling error; check that the receiver is running.'};
+  ws.onclose=()=>{closePeer('Signaling server disconnected. Reload this page after restarting it.')};
+}
+connect();
+</script>

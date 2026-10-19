@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8">
+<title>Phone Camera Sender</title>
+<style>
+body{font:16px system-ui,sans-serif;max-width:700px;margin:24px auto;padding:0 16px;background:#15171a;color:#f2f2f2}
+video{width:100%;background:#000;border-radius:10px}button,select{font:inherit;padding:12px;margin:6px 4px 6px 0}#status{padding:10px 0;color:#b9d7ff}
+</style>
+<h1>Phone Camera Sender</h1>
+<p id="status">Tap Start to share the camera and microphone with this PC.</p>
+<video id="preview" autoplay muted playsinline></video>
+<p><label>Camera: <select id="camera"></select></label></p>
+<button id="start">Start streaming</button><button id="stop" disabled>Stop</button>
+<script>
+const statusEl=document.querySelector('#status'), preview=document.querySelector('#preview');
+const select=document.querySelector('#camera'); let stream, pc, ws, negotiating=false, negotiateAgain=false;
+async function listCameras(preferredDeviceId=select.value, preferredIndex=select.selectedIndex){
+  const devices=await navigator.mediaDevices.enumerateDevices();
+  const cams=devices.filter(d=>d.kind==='videoinput'); select.replaceChildren();
+  cams.forEach((d,i)=>{const o=document.createElement('option');o.value=d.deviceId;o.textContent=d.label||`Camera ${i+1}`;select.append(o)});
+  if(preferredDeviceId&&cams.some(d=>d.deviceId===preferredDeviceId))select.value=preferredDeviceId;
+  else if(cams.length&&preferredIndex>=0)select.selectedIndex=Math.min(preferredIndex,cams.length-1);
+}
+function waitForIce(pc){
+  if(pc.iceGatheringState==='complete')return Promise.resolve();
+  return new Promise(resolve=>pc.addEventListener('icegatheringstatechange',()=>pc.iceGatheringState==='complete'&&resolve(),{once:false}));
+}
+async function negotiate(){
+  if(negotiating){negotiateAgain=true;return}
+  if(!ws||ws.readyState!==WebSocket.OPEN||!stream)return;
+  negotiating=true;
+  try{
+    if(pc)pc.close();
+    pc=new RTCPeerConnection({iceServers:[]});
+    stream.getTracks().forEach(t=>pc.addTrack(t,stream));
+    pc.onconnectionstatechange=()=>{
+      statusEl.textContent=`Stream ${pc.connectionState}${pc.connectionState==='connected'?' directly to the PC':''}. Keep this page open.`;
+    };
+    const offer=await pc.createOffer();await pc.setLocalDescription(offer);await waitForIce(pc);
+    if(ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(pc.localDescription));
+    else throw new Error('Signaling connection closed');
+    statusEl.textContent='Offer sent; waiting for the PC viewer…';
+  }catch(e){statusEl.textContent=`Could not negotiate stream: ${e.message}`}
+  finally{
+    negotiating=false;
+    if(negotiateAgain){negotiateAgain=false;negotiate()}
+  }
+}
+async function start(){
+  try{
+    document.querySelector('#start').disabled=true;
+    statusEl.textContent='Requesting camera and microphone permission…';
+    const requestedDeviceId=select.value, requestedIndex=select.selectedIndex;
+    const permissionStream=await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+    permissionStream.getTracks().forEach(t=>t.stop());
+    await listCameras(requestedDeviceId,requestedIndex);
+    const deviceId=select.value;
+    statusEl.textContent=`Opening ${select.selectedOptions[0]?.textContent||'selected camera'}…`;
+    stream=await navigator.mediaDevices.getUserMedia({video:{deviceId:deviceId?{exact:deviceId}:undefined},audio:true});
+    const track=stream.getVideoTracks()[0], activeDeviceId=track.getSettings().deviceId;
+    preview.srcObject=stream;await listCameras(activeDeviceId||deviceId,select.selectedIndex);select.disabled=true;
+    statusEl.textContent=`Using ${track.label||select.selectedOptions[0]?.textContent||'selected camera'}${track.getSettings().facingMode?` (${track.getSettings().facingMode})`:''}; connecting…`;
+    const wsUrl=`wss://${location.host}/signal?role=sender`;
+    ws=new WebSocket(wsUrl);
+    ws.onopen=()=>{statusEl.textContent='Connected to signaling server; preparing stream…';negotiate()};
+    ws.onmessage=async event=>{
+      const message=JSON.parse(event.data);
+      if(message.type==='answer'&&pc){
+        try{await pc.setRemoteDescription(message);statusEl.textContent='Viewer answer received; connecting…'}
+        catch(e){statusEl.textContent=`Could not apply viewer answer: ${e.message}`}
+      }else if(message.type==='peer-reset'){
+        statusEl.textContent='Viewer reconnected; renegotiating…';negotiate();
+      }else if(message.type==='bye'){
+        if(pc){pc.close();pc=null}statusEl.textContent='Viewer disconnected. Waiting for OBS viewer…';
+      }else if(message.type==='error')statusEl.textContent=`Signaling error: ${message.message}`;
+    };
+    ws.onerror=()=>{statusEl.textContent='Signaling error. Check that the PC receiver is running.'};
+    ws.onclose=()=>{if(stream)statusEl.textContent='Signaling connection closed. Restart the receiver and reconnect.'};
+    document.querySelector('#stop').disabled=false;
+  }catch(e){statusEl.textContent=`Could not start: ${e.message}`;document.querySelector('#start').disabled=false;stop(false)}
+}
+function stop(sendBye=true){
+  if(sendBye&&ws&&ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify({type:'bye'}));
+  if(pc){pc.close();pc=null}if(ws){ws.close();ws=null}
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+  preview.srcObject=null;select.disabled=false;document.querySelector('#start').disabled=false;document.querySelector('#stop').disabled=true;
+  statusEl.textContent='Stopped. Tap Start to reconnect.';
+}
+document.querySelector('#start').onclick=start;document.querySelector('#stop').onclick=()=>stop();
+listCameras().catch(()=>{});
+</script>
