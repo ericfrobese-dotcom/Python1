@@ -16,6 +16,18 @@ Install the Python package from this folder:
 python3 -m pip install -r requirements.txt
 ```
 
+When building with PyInstaller, bundle the `web` folder so the executable can serve the HTML pages. Run the command from this folder:
+
+```bash
+# Linux / macOS
+pyinstaller --onefile --add-data --noconsole "phone_camera/web:web" phone_camera/phone_camera.py
+
+# Windows
+pyinstaller --onefile --add-data --no console "phone_camera/web;web" phone_camera/phone.camera.py
+```
+
+For a `.spec` build, include the page files as data with destination `web`.
+
 ## Start
 
 From this folder, run:

@@ -11,6 +11,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk
@@ -19,7 +20,10 @@ from pathlib import Path
 
 from aiohttp import WSMsgType, web
 
-BASE_DIR = Path(__file__).resolve().parent
+# PyInstaller extracts bundled data under _MEIPASS (one-file builds) or
+# places it beside the executable (one-folder builds). In source runs, use
+# the script directory as usual.
+BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 WEB_DIR = BASE_DIR / "web"
 signal_sockets = {}
 session = {"offer": None, "answer": None}
@@ -158,9 +162,15 @@ async def signaling(request):
 
 async def page(request):
     name = "sender.html" if request.path == "/sender" else "obs.html"
+    file_path = WEB_DIR / name
     if ui_events:
         ui_events.put(("activity", f"{request.path} opened by {request.remote or 'unknown device'}"))
-    return web.FileResponse(WEB_DIR / name)
+    if not file_path.is_file():
+        message = f"Page file not found: {file_path}. Include the web folder when building the executable."
+        if ui_events:
+            ui_events.put(("activity", message))
+        raise web.HTTPInternalServerError(text=message)
+    return web.FileResponse(file_path)
 
 
 async def status(request):
