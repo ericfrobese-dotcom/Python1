@@ -20,10 +20,10 @@ When building with PyInstaller, bundle the `web` folder so the executable can se
 
 ```bash
 # Linux / macOS
-pyinstaller --onefile --add-data --noconsole "phone_camera/web:web" phone_camera/phone_camera.py
+pyinstaller --onefile --add-data "phone_camera/web:web" --noconsole phone_camera/phone_camera.py
 
 # Windows
-pyinstaller --onefile --add-data --no console "phone_camera/web;web" phone_camera/phone.camera.py
+pyinstaller --onefile --add-data "phone_camera/web;web" --noconsole phone_camera/phone.camera.py
 ```
 
 For a `.spec` build, include the page files as data with destination `web`.
