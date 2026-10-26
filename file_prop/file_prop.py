@@ -14,6 +14,7 @@ import urllib.parse as up
 import threading
 import queue
 import tempfile
+import subprocess
 #setRunDir = True
 setRunDir = False
 home = os.getcwd()
@@ -46,6 +47,7 @@ class win(Frame):
         # Tools Menu
         tools = Menu(menu)
         tools.add_command(label='Start Prop',command=self.startProp)
+        tools.add_command(label='Run Nightly Backup Now', command=self.runNightlyBackup)
         menu.add_cascade(label='Tools', menu=tools)
         # Document Menu
         documentation = Menu(menu)
@@ -148,6 +150,16 @@ class win(Frame):
         # Row 8 - Start Propagate Button
         self.spButton = Button(self, text = "Start Propagation", command = self.startProp)
         self.spButton.grid(row = 8)
+        # Nightly backups create a dated snapshot for each source directory.
+        self.backup_time = StringVar(value='02:00')
+        Label(self, text='Nightly backup time (24h HH:MM):').grid(row=9, column=0, sticky=W, padx=4)
+        Entry(self, textvariable=self.backup_time, width=8).grid(row=9, column=1, sticky=W)
+        self.nightly_var = IntVar(value=0)
+        Checkbutton(self, text='Enable nightly backups while this app is running',
+                    variable=self.nightly_var, command=self.toggleNightlyBackup).grid(
+                        row=10, column=0, columnspan=3, sticky=W, padx=4)
+        self._nightly_running = False
+        self._nightly_last_run = None
 
     def gStat(self, msg, f = 'white', b = 'black'):
         display_msg = str(msg)
@@ -243,6 +255,8 @@ class win(Frame):
             try:
                 with open(fsofn, 'wt') as fo:
                     fo.write(f'sink={1 if self.sink_var.get() else 0}\n')
+                    fo.write('backup_time={}\n'.format(self.backup_time.get().strip()))
+                    fo.write('nightly={}\n'.format(1 if self.nightly_var.get() else 0))
             except Exception as e:
                 print(f'Could not save options file {fsofn}: {e}')
             sd = ''
@@ -254,7 +268,77 @@ class win(Frame):
         self.gStat('Profile {} Saved.'.format(pn))
 
     def client_exit(self):
+        self._nightly_running = False
         root.destroy()
+
+    def toggleNightlyBackup(self):
+        if self.nightly_var.get():
+            try:
+                dt.datetime.strptime(self.backup_time.get().strip(), '%H:%M')
+            except ValueError:
+                self.nightly_var.set(0)
+                mb.showerror('Invalid backup time', 'Enter a time in 24-hour HH:MM format, such as 02:00.')
+                return
+            self._nightly_running = True
+            self._checkNightlyBackup()
+            self.gStat('Nightly backups enabled for {}'.format(self.backup_time.get().strip()))
+        else:
+            self._nightly_running = False
+            self.gStat('Nightly backups disabled')
+
+    def _checkNightlyBackup(self):
+        if not self._nightly_running:
+            return
+        now = dt.datetime.now()
+        try:
+            scheduled = dt.datetime.strptime(self.backup_time.get().strip(), '%H:%M').time()
+        except ValueError:
+            self.nightly_var.set(0)
+            self._nightly_running = False
+            self.gStat('Invalid nightly backup time', 'white', 'red')
+            return
+        if now.time() >= scheduled and self._nightly_last_run != now.date():
+            self._nightly_last_run = now.date()
+            self.runNightlyBackup()
+        self.master.after(30000, self._checkNightlyBackup)
+
+    def runNightlyBackup(self):
+        """Sync configured [DIR] sources into each destination."""
+        sources = [line.strip()[5:].strip() for line in self.twsf.get('1.0', 'end-1c').splitlines()
+                   if line.strip().startswith('[DIR]')]
+        destinations = [line.strip() for line in self.twdd.get('1.0', 'end-1c').splitlines()
+                         if line.strip()]
+        if not sources or not destinations:
+            mb.showerror('Backup configuration required',
+                         'Add one or more source directories and a destination directory first.')
+            return
+        errors = []
+        created = updated = skipped = 0
+        for destination in destinations:
+            resolved = self._normalize_destination(destination)
+            target = resolved if resolved != destination and os.path.isdir(resolved) else destination
+            if not os.path.isdir(target):
+                self._propagation_error(errors, '', destination, 'Destination is unavailable.')
+                continue
+            for source in sources:
+                source = os.path.normpath(source)
+                if not os.path.isdir(source):
+                    self._propagation_error(errors, source, target, 'Source directory is unavailable.')
+                    continue
+                try:
+                    counts = self._sync_dir_to_dest(source, target, error_details=errors)
+                    created += counts['created']
+                    updated += counts['updated']
+                    skipped += counts['skipped']
+                except Exception as e:
+                    self._propagation_error(errors, source, target, e)
+        if errors:
+            self.gStat('Nightly sync completed: {} created, {} updated, {} skipped, {} error(s)'.format(
+                created, updated, skipped, len(errors)), 'white', 'red')
+            self._show_propagation_errors(errors)
+        else:
+            self.gStat('Nightly sync completed: {} created, {} updated, {} skipped'.format(
+                created, updated, skipped), 'white', 'green')
     
     def selectDir(self):
         # Try to open the directory chooser rooted at common mount points so attached devices are shown
@@ -347,6 +431,13 @@ class win(Frame):
                                 self.sink_var.set(1 if val else 0)
                             except Exception:
                                 pass
+                        elif line.startswith('backup_time='):
+                            self.backup_time.set(line.split('=',1)[1].strip())
+                        elif line.startswith('nightly='):
+                            try:
+                                self.nightly_var.set(int(line.split('=',1)[1]))
+                            except ValueError:
+                                pass
             except Exception as e:
                 print(f'Could not read options file {fsofn}: {e}')
         os.chdir(self.runDir)
@@ -374,6 +465,8 @@ class win(Frame):
         pn = pn[:-4]
         print('Parsed screen display profile name = {}'.format(pn))
         self.gStat('Loaded Profile: {}'.format(pn))
+        if self.nightly_var.get():
+            self.toggleNightlyBackup()
         self.profileEntry.delete(0,END)
         self.profileEntry.insert(0,pn) 
         self.profileEntry.grid(row = 2, sticky = W)   
@@ -400,9 +493,7 @@ class win(Frame):
         print('Source directory {} added to Source list'.format(sd))
         
     def _normalize_destination(self, dd):
-        """Normalize destination string. Support mtp:// URIs by resolving gvfs mount under /run/user/<uid>/gvfs.
-        Returns a filesystem path if resolvable, otherwise returns original dd unchanged.
-        """
+        """Resolve MTP and Nemo SMB URIs to mounted GVFS filesystem paths."""
         if not dd:
             return dd
         dd = dd.strip()
@@ -412,6 +503,59 @@ class win(Frame):
         # extended-length form (\\\\?\\...), which has its own syntax.
         if dd[:3] == '\\' * 3 and not dd.startswith('\\' * 2 + '?' + '\\'):
             dd = '\\' * 2 + dd.lstrip('\\')
+        # Nemo/GNOME exposes SMB shares under GVFS paths such as
+        # /run/user/<uid>/gvfs/smb-share:server=host,share=Share. Resolve both
+        # smb://host/share and the single-slash smb:/host/share spelling.
+        if dd.lower().startswith('smb:'):
+            rest = re.sub(r'^smb:/+', '', dd, flags=re.IGNORECASE)
+            parts = [up.unquote(part) for part in rest.split('/') if part]
+            if len(parts) < 2:
+                return dd
+            host, share = parts[:2]
+            subpath = parts[2:]
+            def find_gvfs_path():
+                for gvfs_root in (f"/run/user/{os.getuid()}/gvfs", os.path.expanduser('~/.gvfs')):
+                    if not os.path.isdir(gvfs_root):
+                        continue
+                    try:
+                        for entry in os.listdir(gvfs_root):
+                            entry_dec = up.unquote(entry)
+                            if 'smb' not in entry_dec.lower():
+                                continue
+                            # GVFS mount names encode the server and share as
+                            # comma-separated key/value pairs.
+                            fields = {}
+                            for field in entry_dec.split(':', 1)[-1].split(','):
+                                if '=' in field:
+                                    key, value = field.split('=', 1)
+                                    fields[key.strip().lower()] = up.unquote(value.strip())
+                            if (fields.get('server', '').lower() == host.lower() and
+                                    fields.get('share', '').lower() == share.lower()):
+                                candidate = os.path.normpath(os.path.join(gvfs_root, entry, *subpath))
+                                if os.path.isdir(candidate):
+                                    return candidate
+                    except OSError as e:
+                        print('Could not inspect GVFS mount directory {}: {}'.format(gvfs_root, e))
+                return None
+
+            mounted_path = find_gvfs_path()
+            if mounted_path:
+                return mounted_path
+            # If the share is not mounted yet, ask GVFS to mount the URI (using
+            # the desktop session's saved credentials or authentication UI),
+            # then look up its filesystem path again.
+            try:
+                mount_uri = 'smb://{}/{}'.format(up.quote(host, safe='.:[]'),
+                                                 up.quote(share, safe=''))
+                subprocess.run(['gio', 'mount', mount_uri], stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, timeout=30, check=False)
+            except (OSError, subprocess.TimeoutExpired) as e:
+                print('Could not mount SMB destination {} through GVFS: {}'.format(dd, e))
+            mounted_path = find_gvfs_path()
+            if mounted_path:
+                return mounted_path
+            return dd
+
         # handle mtp URI variants
         if dd.lower().startswith('mtp:'):
             # remove leading scheme
@@ -450,6 +594,39 @@ class win(Frame):
             return dd
         else:
             return dd
+
+    @staticmethod
+    def _gvfs_smb_uri(path):
+        """Convert a GVFS SMB mount path back to an smb:// URI, if possible."""
+        path = os.path.abspath(path)
+        roots = (f"/run/user/{os.getuid()}/gvfs", os.path.expanduser('~/.gvfs'))
+        for gvfs_root in roots:
+            try:
+                for entry in os.listdir(gvfs_root):
+                    if not entry.lower().startswith('smb-share:'):
+                        continue
+                    mount_path = os.path.join(gvfs_root, entry)
+                    try:
+                        if os.path.commonpath((path, mount_path)) != mount_path:
+                            continue
+                    except ValueError:
+                        continue
+                    fields = {}
+                    for field in entry.split(':', 1)[-1].split(','):
+                        if '=' in field:
+                            key, value = field.split('=', 1)
+                            fields[key.strip().lower()] = up.unquote(value.strip())
+                    host, share = fields.get('server'), fields.get('share')
+                    if not host or not share:
+                        continue
+                    relative = os.path.relpath(path, mount_path)
+                    pieces = [] if relative == '.' else relative.split(os.sep)
+                    uri_path = '/'.join(up.quote(piece, safe='') for piece in pieces)
+                    uri = 'smb://{}/{}'.format(up.quote(host, safe='.:[]'), up.quote(share, safe=''))
+                    return uri + ('/' + uri_path if uri_path else '')
+            except OSError:
+                continue
+        return None
 
     def startProp(self):
         ok = True
@@ -845,12 +1022,37 @@ class win(Frame):
                         with open(src_f, 'rb') as sfh, open(dest_f, 'wb') as dfh:
                             shutil.copyfileobj(sfh, dfh)
                     except Exception as e2:
+                        # GVFS SMB mounts can reject POSIX overwrite operations
+                        # with EINVAL even when the share is writable. Use GIO
+                        # against the SMB URI so the desktop backend performs
+                        # the remote copy/replace itself.
+                        remote_uri = self._gvfs_smb_uri(dest_f)
+                        gio_error = None
+                        if remote_uri:
+                            try:
+                                import gi
+                                from gi.repository import Gio
+                                source_gfile = Gio.File.new_for_path(src_f)
+                                destination_gfile = Gio.File.new_for_uri(remote_uri)
+                                source_gfile.copy(
+                                    destination_gfile, Gio.FileCopyFlags.OVERWRITE, None)
+                                if d_mtime == 0:
+                                    counts['created'] += 1
+                                else:
+                                    counts['updated'] += 1
+                                processed += 1
+                                if progress_callback:
+                                    progress_callback(processed, total_files, src_f)
+                                continue
+                            except Exception as gio_exception:
+                                gio_error = str(gio_exception)
                         counts['errors'] += 1
                         print(f"Error copying {src_f} -> {dest_f}: {e} -- {e2}")
                         if error_details is not None:
                             self._propagation_error(
                                 error_details, src_f, dest_f,
-                                'copy2 failed: {}; fallback copy failed: {}'.format(e, e2))
+                                'copy2 failed: {}; fallback copy failed: {}{}'.format(
+                                    e, e2, '; gio copy failed: {}'.format(gio_error) if gio_error else ''))
                         processed += 1
                         if progress_callback:
                             progress_callback(processed, total_files, src_f)
@@ -875,4 +1077,3 @@ else:
     root.minsize(800,380)
 app = win(root)
 root.mainloop()
-
