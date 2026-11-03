@@ -36,7 +36,7 @@ From this folder, run:
 python3 phone_camera.py
 ```
 
-The program opens a window showing the phone sender URL, OBS viewer URL, server and device connection status, and recent page access activity. The URLs are also printed in the terminal. On the phone, open a listed `https://.../sender` address, accept the local certificate warning, allow camera and microphone access, then tap **Start streaming**. Keep that browser tab open while using the camera.
+The program opens a window showing the phone sender URL, OBS viewer URL, server and device connection status, and recent page access activity. Use the **Copy** buttons beside the URLs to copy them to the clipboard; the URLs are also printed in the terminal. On the phone, open a listed `https://.../sender` address, accept the local certificate warning, allow camera and microphone access, then tap **Start streaming**. Keep that browser tab open while using the camera.
 
 In OBS, add a **Browser** source and use the printed `http://127.0.0.1:8766/obs` URL. The page waits for the phone and renegotiates when either browser reconnects. The viewer attempts to play with audio enabled by default, including in OBS. If a browser blocks audio autoplay, it falls back to muted video and shows **Enable audio**; in OBS, use the Browser Source's **Interact** window to click it. Check OBS's audio mixer, and enable **Control Audio via OBS** if you need the feed as a separately controlled audio source.
 

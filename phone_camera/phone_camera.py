@@ -239,10 +239,9 @@ class CameraWindow:
         self.state_label.pack(anchor="w", pady=(8, 12))
         self.urls = ttk.LabelFrame(frame, text="Connection URLs", padding=8)
         self.urls.pack(fill="x", pady=(0, 12))
-        self.sender_label = ttk.Label(self.urls, text="Phone sender: preparing…", justify="left", wraplength=660)
-        self.sender_label.pack(anchor="w", fill="x")
-        self.viewer_label = ttk.Label(self.urls, text="OBS viewer: preparing…", justify="left", wraplength=660)
-        self.viewer_label.pack(anchor="w", fill="x", pady=(6, 0))
+        self.url_rows = ttk.Frame(self.urls)
+        self.url_rows.pack(fill="x")
+        ttk.Label(self.url_rows, text="Preparing connection URLs…").pack(anchor="w")
         ttk.Label(frame, text="Recent activity").pack(anchor="w")
         self.activity = ScrolledText(frame, height=16, state="disabled", wrap="word")
         self.activity.pack(fill="both", expand=True, pady=(4, 0))
@@ -255,8 +254,14 @@ class CameraWindow:
             event = self.events.get_nowait()
             if event[0] == "ready":
                 _, sender_urls, viewer_url = event
-                self.sender_label.config(text="Phone sender:\n" + ("\n".join(sender_urls) or "No LAN address found"))
-                self.viewer_label.config(text="OBS viewer:\n" + viewer_url)
+                for child in self.url_rows.winfo_children():
+                    child.destroy()
+                if sender_urls:
+                    for url in sender_urls:
+                        self.add_url_row("Phone sender", url)
+                else:
+                    ttk.Label(self.url_rows, text="Phone sender: No LAN address found").pack(anchor="w")
+                self.add_url_row("OBS viewer", viewer_url)
                 self.state_label.config(text="Server running")
                 self.add_activity("Server started")
             elif event[0] == "status":
@@ -269,6 +274,21 @@ class CameraWindow:
                 self.state_label.config(text="Server error: " + event[1])
                 self.add_activity("Server error: " + event[1])
         self.root.after(150, self.process_events)
+
+    def add_url_row(self, label, url):
+        row = ttk.Frame(self.url_rows)
+        row.pack(fill="x", pady=(0, 4))
+        ttk.Label(row, text=label, width=13).pack(side="left")
+        value = ttk.Entry(row, state="readonly")
+        value.pack(side="left", fill="x", expand=True)
+        value.configure(state="normal")
+        value.insert(0, url)
+        value.configure(state="readonly")
+        ttk.Button(row, text="Copy", command=lambda: self.copy_to_clipboard(url)).pack(side="left", padx=(6, 0))
+
+    def copy_to_clipboard(self, value):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(value)
 
     def add_activity(self, message):
         from datetime import datetime
