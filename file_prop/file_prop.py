@@ -17,6 +17,7 @@ import tempfile
 import subprocess
 #setRunDir = True
 setRunDir = False
+MIN_FREE_SPACE_BYTES = 1024 ** 3
 home = os.getcwd()
 if setRunDir:
     if home.find('/') > -1:
@@ -199,6 +200,82 @@ class win(Frame):
             'destination': destination or '(not available)',
             'detail': str(detail),
         })
+
+    def _prepare_destination(self, destination, confirm_missing=True):
+        """Resolve/create a destination and warn when less than 1 GiB is free."""
+        resolved = self._normalize_destination(destination)
+        target = resolved if resolved != destination else destination
+        if not os.path.isdir(target):
+            if target.lower().startswith(('smb:', 'mtp:')):
+                return None, 'Destination is not mounted or could not be resolved.'
+            if os.path.exists(target):
+                return None, 'Destination exists but is not a directory.'
+            if confirm_missing and not mb.askyesno(
+                    'Create destination directory?',
+                    'The destination directory does not exist:\n{}\n\nCreate it now?'.format(target),
+                    parent=self):
+                return None, 'Destination directory does not exist; creation was declined.'
+            try:
+                os.makedirs(target, exist_ok=True)
+            except OSError as e:
+                mb.showerror(
+                    'Could not create destination directory',
+                    'Could not create {}:\n{}'.format(target, e),
+                    parent=self)
+                return None, 'Could not create destination directory: {}'.format(e)
+            if not os.path.isdir(target):
+                return None, 'Destination path is not a directory.'
+
+        try:
+            free_space = shutil.disk_usage(target).free
+        except OSError as e:
+            print('Could not check available space at {}: {}'.format(target, e))
+            mb.showwarning(
+                'Could not check destination space',
+                'Could not determine available space at {}:\n{}'.format(target, e),
+                parent=self)
+        else:
+            if free_space < MIN_FREE_SPACE_BYTES:
+                free_gib = free_space / (1024 ** 3)
+                mb.showwarning(
+                    'Low destination space',
+                    'Only {:.2f} GiB is available at {}. Less than 1 GiB is free.'.format(
+                        free_gib, target),
+                    parent=self)
+        return target, None
+
+    def _confirm_sync_directory_creation(self, source_dirs, destination):
+        """Confirm creation of missing destination directories needed by a sync."""
+        missing = set()
+        if not os.path.isdir(destination):
+            missing.add(destination)
+        for source_dir in source_dirs:
+            for root, dirs, _ in os.walk(source_dir):
+                relative = os.path.relpath(root, source_dir)
+                target_root = (os.path.join(destination, relative)
+                               if relative != '.' else destination)
+                if not os.path.isdir(target_root):
+                    missing.add(target_root)
+                for dirname in dirs:
+                    target_dir = os.path.join(target_root, dirname)
+                    if not os.path.isdir(target_dir):
+                        missing.add(target_dir)
+        if not missing:
+            return True
+
+        paths = sorted(missing)
+        preview = '\n'.join(paths[:8])
+        if len(paths) > 8:
+            remaining = len(paths) - 8
+            remaining_word = 'directory' if remaining == 1 else 'directories'
+            preview += '\n... and {} more {}'.format(remaining, remaining_word)
+        directory_word = 'directory' if len(paths) == 1 else 'directories'
+        return mb.askyesno(
+            'Confirm destination directories',
+            'The sync will create {} missing destination {}:\n{}\n\n'
+            'This may recreate parts of the source directory structure in this location. '
+            'Continue?'.format(len(paths), directory_word, preview),
+            parent=self)
         
     def viewDoc(self):
         fn = self.df  # Documentation file
@@ -316,9 +393,20 @@ class win(Frame):
         created = updated = skipped = 0
         for destination in destinations:
             resolved = self._normalize_destination(destination)
-            target = resolved if resolved != destination and os.path.isdir(resolved) else destination
-            if not os.path.isdir(target):
-                self._propagation_error(errors, '', destination, 'Destination is unavailable.')
+            candidate = resolved if resolved != destination else destination
+            if (candidate == destination and
+                    destination.lower().startswith(('smb:', 'mtp:'))):
+                target, destination_error = self._prepare_destination(
+                    destination, confirm_missing=False)
+            elif not self._confirm_sync_directory_creation(sources, candidate):
+                self._propagation_error(
+                    errors, '', destination, 'Destination directory creation was declined.')
+                continue
+            else:
+                target, destination_error = self._prepare_destination(
+                    destination, confirm_missing=False)
+            if destination_error:
+                self._propagation_error(errors, '', destination, destination_error)
                 continue
             for source in sources:
                 source = os.path.normpath(source)
@@ -531,8 +619,13 @@ class win(Frame):
                                     fields[key.strip().lower()] = up.unquote(value.strip())
                             if (fields.get('server', '').lower() == host.lower() and
                                     fields.get('share', '').lower() == share.lower()):
-                                candidate = os.path.normpath(os.path.join(gvfs_root, entry, *subpath))
-                                if os.path.isdir(candidate):
+                                mount_path = os.path.join(gvfs_root, entry)
+                                candidate = os.path.normpath(os.path.join(mount_path, *subpath))
+                                try:
+                                    inside_mount = os.path.commonpath((candidate, mount_path)) == mount_path
+                                except ValueError:
+                                    inside_mount = False
+                                if inside_mount:
                                     return candidate
                     except OSError as e:
                         print('Could not inspect GVFS mount directory {}: {}'.format(gvfs_root, e))
@@ -670,17 +763,21 @@ class win(Frame):
                 dlines = [l for l in twddv.splitlines() if l.strip()]
                 dests = []
                 for dd in dlines:
-                    dd_res = self._normalize_destination(dd)
-                    dd_use = dd_res if dd_res != dd and os.path.isdir(dd_res) else dd
-                    if dd.lower().startswith('mtp:') and dd_res == dd:
-                        print('Skipping MTP destination not mounted: {}'.format(dd))
-                        self._propagation_error(propagation_errors, source_dir, dd,
-                                                'MTP device is not mounted or could not be resolved.')
-                        continue
-                    if not os.path.isdir(dd_use):
-                        print('Destination not a dir: {}'.format(dd_use))
-                        self._propagation_error(propagation_errors, source_dir, dd,
-                                                'Destination directory does not exist or is not accessible.')
+                    resolved = self._normalize_destination(dd)
+                    candidate = resolved if resolved != dd else dd
+                    if (candidate == dd and dd.lower().startswith(('smb:', 'mtp:'))):
+                        dd_use, destination_error = self._prepare_destination(
+                            dd, confirm_missing=False)
+                    elif not self._confirm_sync_directory_creation([source_dir], candidate):
+                        destination_error = 'Destination directory creation was declined.'
+                        dd_use = None
+                    else:
+                        dd_use, destination_error = self._prepare_destination(
+                            dd, confirm_missing=False)
+                    if destination_error:
+                        print('Skipping destination {}: {}'.format(dd, destination_error))
+                        self._propagation_error(
+                            propagation_errors, source_dir, dd, destination_error)
                         continue
                     # quick writability test: try to create and remove a temp file in the dest root
                     try:
@@ -722,6 +819,18 @@ class win(Frame):
                 swd = t.replace('/','\\')
                 t = dwd
                 dwd = t.replace('/','\\')
+            prepared_destinations = {}
+            for destination in (line for line in dwd.splitlines() if line.strip()):
+                if destination in prepared_destinations:
+                    continue
+                target, destination_error = self._prepare_destination(destination)
+                if destination_error:
+                    ec += 1
+                    print('Skipping destination {}: {}'.format(destination, destination_error))
+                    self._propagation_error(
+                        propagation_errors, '', destination, destination_error)
+                else:
+                    prepared_destinations[destination] = target
             print('\nStart Propagate Function called ---')
             twddv = dwd
             seld = swd.find('\n')  # Source End Line Detected
@@ -787,34 +896,12 @@ class win(Frame):
                         deld = dwd.find('\n')
                         continue
                     print('Checking Destination Directory: {}'.format(dd))
-                    # normalize destination (supports mtp:// URIs via gvfs)
-                    dd_res = self._normalize_destination(dd)
-                    if dd_res != dd and os.path.isdir(dd_res):
-                        dd_use = dd_res
-                    else:
-                        dd_use = dd
-                    print('dd: {} dd_res: {} dd_use: {} bfn: {}'.format(dd, dd_res, dd_use, bfn))
-                    # If the normalized looks like an mtp URI and didn't resolve, warn user
-                    if dd.lower().startswith('mtp:') and dd_res == dd:
-                        print('Error: MTP path provided but device mount not found for: {}'.format(dd))
-                        ec += 1
-                        self.gStat('MTP device not mounted or not accessible: {}'.format(dd),'black','red')
-                        mb.showerror('MTP device not mounted', f"Could not resolve MTP path: {dd}\nPlease open the device in your file manager so it is mounted and try again.")
-                        self._propagation_error(propagation_errors, sf, dd,
-                                                'MTP device is not mounted or could not be resolved.')
+                    dd_use = prepared_destinations.get(dd)
+                    if dd_use is None:
                         deld = dwd.find('\n')
                         continue
+                    print('dd: {} dd_use: {} bfn: {}'.format(dd, dd_use, bfn))
                     fdn = os.path.join(dd_use, bfn)  # Full Dest Name
-                    # ensure destination directory exists and is accessible
-                    if not os.path.isdir(dd_use):
-                        print('Error: destination directory does not exist: {}'.format(dd_use))
-                        ec += 1
-                        self.gStat('Destination Directory {} Not Found'.format(dd_use),'black','red')
-                        mb.showerror('Directory not found:',dd_use)
-                        self._propagation_error(propagation_errors, sf, dd_use,
-                                                'Destination directory does not exist or is not accessible.')
-                        deld = dwd.find('\n')
-                        continue
                     try:
                         ls = os.listdir(dd_use)
                     except Exception as e:
